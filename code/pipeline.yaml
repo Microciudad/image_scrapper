@@ -1,0 +1,231 @@
+# Cover Fetcher – Image Processing Pipeline Configuration
+#
+# This file defines the ordered list of image transformations applied to every
+# downloaded cover image.  Each entry in `pipeline` is a step with a `step`
+# name and optional parameters.
+#
+# Random values
+# -------------
+# Any numeric parameter can be replaced with a random range using the syntax:
+#
+#   param: {random: [min, max]}
+#
+# A fresh value is drawn uniformly from [min, max] for each image processed.
+# Examples:
+#   degrees:     {random: [-5, 5]}     # random tilt between -5° and +5°
+#   clip_percent:{random: [0.1, 0.4]}  # random histogram clip
+#   black_point: {random: [0.12, 0.22]}
+#   opacity:     {random: [0.25, 0.45]}
+#
+# Supported steps
+# ---------------
+#
+#   rotate
+#     degrees (float)   – clockwise rotation angle.  Default: 0.
+#     expand  (bool)    – expand canvas to fit the rotated image.  Default: true.
+#
+#   auto_brightness
+#     clip_percent (float) – percentage of pixels to clip at each end of the
+#                            brightness histogram before stretching.  Default: 1.0.
+#
+#   auto_saturation
+#     clip_percent (float) – same as above, applied to the saturation channel.
+#                            Default: 1.0.
+#
+#   crush_blacks
+#     black_point (float) – normalized shadow threshold in [0,1]. Pixels darker
+#                           than this become pure black. Start around 0.14-0.22.
+#
+#   distress
+#     Overlays analogue-damage artifacts: wavy scratch lines (like vinyl or
+#     photo scratches) and tiny dust/dirt specks. Each artifact is drawn on a
+#     transparent RGBA layer and composited so the underlying image shows through.
+#     All counts support {random: [min, max]} for variety per image.
+#
+#     scratches (int)       – number of scratch lines drawn across the image.
+#                               0  → none
+#                               3  → subtle, occasional scratch
+#                               5  → moderate, clearly aged look  ← default
+#                              10+ → heavily damaged
+#
+#     dust_spots (int)      – number of tiny dust/dirt specks scattered randomly.
+#                               0  → none
+#                              15  → light dusting
+#                              30  → noticeable dust  ← default
+#                              80+ → very dirty/degraded
+#
+#     scratch_opacity (float) – how visible scratches are [0, 1].
+#                               0.3 → faint ghost scratches
+#                               0.55 → natural-looking  ← default
+#                               0.9 → harsh, very obvious
+#
+#     dust_opacity (float)  – visibility of dust specks [0, 1]. Default: 0.45.
+#
+#     scratch_width (int)   – maximum scratch line thickness in pixels.
+#                               1 → hair-thin  ← default
+#                               2 → slightly thicker on some scratches
+#
+#   denoise
+#     Reduces JPEG compression artifacts (blocking, ringing) and film-like
+#     grain. Best placed BEFORE resize so you clean the source image first,
+#     then upscale and sharpen the clean result.
+#
+#     mode (str)       – 'gaussian' (default): mild blur that smooths JPEG
+#                        block edges and ringing halos.
+#                        'median': replaces each pixel with the median of its
+#                        neighbours – excellent for isolated noise/grain.
+#
+#     radius (float)   – Gaussian blur radius (gaussian mode only).
+#                          0.3 → barely perceptible, just removes ringing
+#                          0.8 → balanced JPEG artifact removal  ← default
+#                          1.5 → strong smoothing; some detail loss
+#                          2.0 → very soft; use only on heavily compressed src
+#
+#     median_size (int) – Kernel diameter for median filter (median mode only,
+#                         must be odd).
+#                           3 → gentle noise removal  ← default
+#                           5 → stronger, removes coarser grain
+#                           7 → aggressive; may blur fine detail
+#
+#     strength (float) – Blend between original (0.0) and fully filtered (1.0).
+#                        Lets you dial in just enough filtering without
+#                        destroying sharpness.
+#                          0.4 → subtle, almost invisible
+#                          0.7 → moderate – good starting point for vinyl scans
+#                          1.0 → full filter applied  ← default
+#
+#   stop
+#     (no parameters) – immediately exits the pipeline, returning the image as-is
+#     at that point. Place it between any two steps to preview the output up to
+#     that stage without deleting or commenting out the remaining steps.
+#
+#   zoom
+#     Crop-and-rescale zoom centered on a focal point.
+#
+#     factor (float)  – zoom amount.
+#                        1.0  → no change
+#                        1.05 → subtle punch-in
+#                        1.20 → noticeable zoom-in
+#                        0.90 → slight zoom-out with black border
+#
+#     center_x (float) – horizontal focus in normalized coordinates [0, 1].
+#                        0.5 = center, 0.0 = far left, 1.0 = far right.
+#
+#     center_y (float) – vertical focus in normalized coordinates [0, 1].
+#                        0.5 = center, 0.0 = top, 1.0 = bottom.
+#
+#   resize
+#     width  (int)         – target width in pixels.  Default: 500.
+#     height (int)         – target height (defaults to width, i.e. square).
+#     keep_aspect (bool)   – preserve aspect ratio and pad with black. Default: true.
+#     unsharp_radius (float) – Controls how wide the sharpening halo is around
+#                              detected edges. Think of it as the "spread" of the
+#                              sharpening effect.
+#                                0.5 → very tight, only the sharpest edges are enhanced
+#                                1.0 → fine detail sharpening (good for text/logos)
+#                                1.5 → balanced, works well for most cover art  ← default
+#                                2.5 → broad sharpening; can look over-processed
+#                              Too high + too much percent = visible white halos.
+#
+#     unsharp_percent (int)  – Sharpening intensity as a percentage (0 = disabled).
+#                              0    → no sharpening at all (bypass)
+#                              60   → subtle, barely noticeable
+#                              120  → moderate, recovers blur from 2× upscale  ← default
+#                              180  → strong, punchy edges – good for vinyl labels
+#                              250+ → aggressive; risks halos and noise amplification
+#
+#     unsharp_threshold (int) – Minimum brightness difference (0–255) between
+#                               neighbouring pixels before sharpening is applied.
+#                               Prevents noise in flat areas (backgrounds, skies)
+#                               from being amplified.
+#                                0 → sharpen everything, including smooth gradients
+#                                3 → ignore micro-noise, sharpen real edges  ← default
+#                                8 → only sharpen high-contrast edges (very selective)
+#                               15 → only the most prominent outlines are touched
+#
+#   watermark
+#     path     (str)   – path to watermark image (PNG or GIF). Default: watermark.gif.
+#     opacity  (float) – transparency in [0,1]. Default: 0.35.
+#     position (str)   – one of: bottom-right, bottom-left, top-right, top-left, center.
+#     scale    (float) – watermark size as fraction of shorter image edge. Default: 0.25.
+#     margin   (int)   – pixel padding from edge for corner positions. Default: 10.
+#
+# To disable a step, simply remove it or comment it out.
+# Steps are applied in the order listed.
+
+pipeline:
+
+  # ↓ move this 'stop' line down to preview output at any stage
+  # - step: stop
+
+  # Optional crop-and-rescale zoom before other effects:
+  # - step: zoom
+  #   factor: {random: [0.95, 1.12]}
+  #   center_x: 0.5
+  #   center_y: 0.5
+
+  # Clean JPEG artifacts/noise on the source BEFORE upscaling.
+
+
+  - step: resize
+    width: 800
+    height: 800
+    keep_aspect: true
+    unsharp_radius: 1.5
+    unsharp_percent: 120
+    unsharp_threshold: 3
+
+  - step: denoise
+    mode: gaussian   # 'gaussian' for JPEG blocks/ringing; 'median' for grain
+    radius: 1.5      # increase to 1.2-1.5 for heavily compressed sources
+    strength: 0.85   # 0.0 = original, 1.0 = full filter
+
+  - step: rotate
+    degrees: {random: [-3, 3]}  # random tilt per image; use a fixed number to disable
+    expand: true    
+  - step: auto_brightness
+    clip_percent: 0.2
+
+  - step: auto_saturation
+    clip_percent: 0.2
+
+  - step: crush_blacks
+    black_point: 0.18
+
+  # Analogue damage effect – uncomment and tune to taste:
+  # - step: distress
+  #   scratches: {random: [3, 8]}
+  #   dust_spots: {random: [20, 50]}
+  #   scratch_opacity: 0.55
+  #   dust_opacity: 0.45
+  #   scratch_width: 1
+
+#  - step: watermark
+#    path: watermark.gif
+#    opacity: 0.35
+#    position: bottom-right
+#    scale: 0.25
+#    margin: 10
+
+  - step: zoom
+    factor: {random: [1.0, 1.12]}
+    center_x: 0.0
+    center_y: 0.0
+
+
+  - step: distress
+    scratches: {random: [0, 3]}     # ← different count every image
+    scratch_opacity: 0.25
+    dust_spots: {random: [15, 40]}    
+    dust_opacity: 0.45
+    scratch_width: 1.5
+
+  #- step: stop
+
+  - step: resize
+    width: 280
+    height: 280
+    keep_aspect: true
+    unsharp_radius: 1.5
+    unsharp_percent: 120
+    unsharp_threshold: 3
