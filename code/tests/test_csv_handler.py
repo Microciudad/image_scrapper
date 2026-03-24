@@ -6,6 +6,8 @@ import csv
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font
+from openpyxl.styles import numbers
 import pytest
 
 from cover_fetcher.csv_handler import (
@@ -288,5 +290,61 @@ def test_update_rows_sets_multiple_values_in_xlsx(tmp_path):
         assert ws.cell(row=2, column=3).value == "a.jpg"
         assert ws.cell(row=3, column=3).value in (None, "")
         assert ws.cell(row=4, column=3).value == "c.jpg"
+    finally:
+        wb.close()
+
+
+def test_update_row_preserves_xlsx_cell_number_format(tmp_path):
+    xlsx_path = tmp_path / "collection.xlsx"
+    _write_simple_xlsx(
+        xlsx_path,
+        ["Band", "Title", EXCEL_IMAGE_COLUMN],
+        [["A", "T", ""]],
+    )
+
+    wb = load_workbook(xlsx_path)
+    try:
+        ws = wb.active
+        ws.cell(row=2, column=3).number_format = numbers.FORMAT_TEXT
+        wb.save(xlsx_path)
+    finally:
+        wb.close()
+
+    update_row(xlsx_path, 0, "a_t_lp.jpg")
+
+    wb = load_workbook(xlsx_path)
+    try:
+        ws = wb.active
+        assert ws.cell(row=2, column=3).value == "a_t_lp.jpg"
+        assert ws.cell(row=2, column=3).number_format == numbers.FORMAT_TEXT
+    finally:
+        wb.close()
+
+
+def test_update_row_inherits_row_style_when_target_cell_unstyled(tmp_path):
+    xlsx_path = tmp_path / "collection.xlsx"
+    _write_simple_xlsx(
+        xlsx_path,
+        ["Band", "Title", EXCEL_IMAGE_COLUMN],
+        [["A", "T", ""]],
+    )
+
+    wb = load_workbook(xlsx_path)
+    try:
+        ws = wb.active
+        ws.cell(row=2, column=1).font = Font(name="Calibri", bold=True, color="00FF0000")
+        wb.save(xlsx_path)
+    finally:
+        wb.close()
+
+    update_row(xlsx_path, 0, "a_t_lp.jpg")
+
+    wb = load_workbook(xlsx_path)
+    try:
+        ws = wb.active
+        image_cell = ws.cell(row=2, column=3)
+        assert image_cell.value == "a_t_lp.jpg"
+        assert image_cell.font.bold is True
+        assert image_cell.font.name == "Calibri"
     finally:
         wb.close()

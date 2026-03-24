@@ -11,6 +11,8 @@ This module reuses the proven scraping approach from the musee project:
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+import html as html_lib
 import logging
 import random
 import re
@@ -59,6 +61,7 @@ _OU_URL_PATTERN = re.compile(r'"ou":"(https?:\\/\\/[^"\\]+)"')
 _IMG_URL_PATTERN = re.compile(r'"(https?://[^"\\]+(?:jpg|jpeg|png|webp)(?:\?[^"\\]*)?)"', re.IGNORECASE)
 _DIRECT_IMG_URL_PATTERN = re.compile(r'https?://[^\s<>"]+\.(?:jpg|jpeg|jpe|png|webp|gif)[^\s<>"]*', re.IGNORECASE)
 _GSTATIC_URL_PATTERN = re.compile(r'https://encrypted-tbn0\.gstatic\.com/images\?[^\s"\'<>]*', re.IGNORECASE)
+_DISCOGS_IMAGE_URL_PATTERN = re.compile(r'https?:\\?/\\?/(?:i|img)\.discogs\.com/[^\s"\'<>]+', re.IGNORECASE)
 
 _USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -100,6 +103,8 @@ _PLAYWRIGHT_BROWSER: Any = None
 _PLAYWRIGHT_CONTEXT: Any = None
 _PLAYWRIGHT_PAGE: Any = None
 _PLAYWRIGHT_HEADLESS: Optional[bool] = None
+_PLAYWRIGHT_OWNER_THREAD_ID: Optional[int] = None
+_BROWSER_FALLBACK_EXECUTOR: Optional[ThreadPoolExecutor] = None
 
 _RETRY_STRATEGY = Retry(
     total=1,
@@ -121,9 +126,10 @@ def build_query(
     label: str,
     year: str,
     marketplace: str = "",
+    edition_country: str = "",
 ) -> str:
     """Return the Google search query string for a record cover."""
-    parts = [_sanitize_query_part(p) for p in [artist, title, format_, label, year]]
+    parts = [_sanitize_query_part(p) for p in [artist, title, format_, label, year, edition_country]]
     parts = [p for p in parts if p]
 
     market = _sanitize_query_part(marketplace)
@@ -139,6 +145,7 @@ def fetch_cover(
     retry_delay: float = 2.0,
     min_image_bytes: int = _MIN_IMAGE_BYTES,
     dump_html_path: Optional[Path] = None,
+    discogs_hq: bool = False,
     final_html_path: Optional[Path] = None,
     final_html_format: str = "mhtml",
     browser_fallback: bool = True,
@@ -161,6 +168,7 @@ def fetch_cover(
         retry_delay: Base delay (seconds) between retries (jitter is added).
         min_image_bytes: Minimum decoded image size to consider valid.
         dump_html_path: Optional path where raw Google HTML responses are written.
+        discogs_hq: If True, prioritize high-resolution Discogs CDN URLs.
         final_html_path: Optional path where the final successful Google results
             page is saved for this fetched image.
         final_html_format: Output format for final_html_path, "mhtml" or "html".
@@ -240,26 +248,43 @@ def fetch_cover(
                             )
                         else:
                             logger.info("Google challenged the HTTP client; falling back to a real browser session")
-                        with _BROWSER_FALLBACK_LOCK:
-                            image_bytes = _fetch_cover_via_browser(
-                                search_query,
-                                min_image_bytes=min_image_bytes,
-                                dump_html_path=dump_html_path,
-                                final_html_path=final_html_path,
-                                final_html_format=final_html_format,
-                                attempt=request_number,
-                                headless=browser_headless,
-                                captcha_wait_seconds=captcha_wait_seconds,
-                                reuse_browser_session=reuse_browser_session,
-                                captcha_cooldown_base_seconds=captcha_cooldown_base_seconds,
-                                captcha_cooldown_max_seconds=captcha_cooldown_max_seconds,
-                                request_label=request_label,
-                            )
+                        image_bytes = _run_browser_fallback(
+                            search_query,
+                            min_image_bytes=min_image_bytes,
+                            dump_html_path=dump_html_path,
+                            discogs_hq=discogs_hq,
+                            final_html_path=final_html_path,
+                            final_html_format=final_html_format,
+                            attempt=request_number,
+                            headless=browser_headless,
+                            captcha_wait_seconds=captcha_wait_seconds,
+                            reuse_browser_session=reuse_browser_session,
+                            captcha_cooldown_base_seconds=captcha_cooldown_base_seconds,
+                            captcha_cooldown_max_seconds=captcha_cooldown_max_seconds,
+                            request_label=request_label,
+                        )
                         if image_bytes:
                             return image_bytes
                         logger.warning("Browser fallback did not yield a usable image")
                     logger.warning("Stopping after blocked Google response; skipping further retries and query variants")
                     return None
+
+                if discogs_hq:
+                    discogs_candidates = _extract_discogs_image_urls(response.text)
+                    if discogs_candidates:
+                        logger.info("Discogs HQ candidates found: %d", len(discogs_candidates))
+                    for image_url in discogs_candidates[:24]:
+                        logger.info("Discogs HQ URL: %s", image_url)
+                        image_bytes = _download_image_url(image_url, headers, min_image_bytes, session=session)
+                        if image_bytes:
+                            _save_final_google_snapshot(
+                                final_html_path,
+                                page=None,
+                                html_fallback=response.text,
+                                output_format=final_html_format,
+                            )
+                            logger.info("Downloaded Discogs HQ image (%d bytes)", len(image_bytes))
+                            return image_bytes
 
                 image_bytes = _extract_first_thumbnail(response.text, min_image_bytes)
                 if image_bytes:
@@ -303,9 +328,94 @@ def fetch_cover(
     return None
 
 
+def _run_browser_fallback(
+    query: str,
+    min_image_bytes: int,
+    dump_html_path: Optional[Path],
+    discogs_hq: bool,
+    final_html_path: Optional[Path],
+    final_html_format: str,
+    attempt: int,
+    headless: bool,
+    captcha_wait_seconds: int,
+    reuse_browser_session: bool,
+    captcha_cooldown_base_seconds: int,
+    captcha_cooldown_max_seconds: int,
+    request_label: str,
+) -> Optional[bytes]:
+    """Run browser fallback either directly or on the dedicated browser thread."""
+    if reuse_browser_session:
+        executor = _get_browser_fallback_executor()
+        future = executor.submit(
+            _fetch_cover_via_browser,
+            query,
+            min_image_bytes,
+            dump_html_path,
+            discogs_hq,
+            final_html_path,
+            final_html_format,
+            attempt,
+            headless,
+            captcha_wait_seconds,
+            reuse_browser_session,
+            captcha_cooldown_base_seconds,
+            captcha_cooldown_max_seconds,
+            request_label,
+        )
+        return future.result()
+
+    with _BROWSER_FALLBACK_LOCK:
+        return _fetch_cover_via_browser(
+            query,
+            min_image_bytes,
+            dump_html_path,
+            discogs_hq,
+            final_html_path,
+            final_html_format,
+            attempt,
+            headless,
+            captcha_wait_seconds,
+            reuse_browser_session,
+            captcha_cooldown_base_seconds,
+            captcha_cooldown_max_seconds,
+            request_label,
+        )
+
+
+def _get_browser_fallback_executor() -> ThreadPoolExecutor:
+    """Return dedicated single-thread executor for reusable browser fallback."""
+    global _BROWSER_FALLBACK_EXECUTOR
+    with _BROWSER_FALLBACK_LOCK:
+        if _BROWSER_FALLBACK_EXECUTOR is None:
+            _BROWSER_FALLBACK_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="browser-fallback")
+        return _BROWSER_FALLBACK_EXECUTOR
+
+
 def close_browser_session() -> None:
     """Close persistent Playwright resources if they were created."""
+    global _BROWSER_FALLBACK_EXECUTOR
+
+    if _BROWSER_FALLBACK_EXECUTOR is not None:
+        executor = _BROWSER_FALLBACK_EXECUTOR
+        _BROWSER_FALLBACK_EXECUTOR = None
+        try:
+            future = executor.submit(_close_browser_session_resources)
+            future.result(timeout=10)
+        except FutureTimeoutError:
+            logger.warning("Timed out closing browser fallback executor resources")
+        except Exception as exc:
+            logger.debug("Browser fallback executor close raised: %s", exc)
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+        return
+
+    _close_browser_session_resources()
+
+
+def _close_browser_session_resources() -> None:
+    """Close persistent Playwright resources if they were created."""
     global _PLAYWRIGHT_CONTEXT, _PLAYWRIGHT_BROWSER, _PLAYWRIGHT_INSTANCE, _PLAYWRIGHT_PAGE, _PLAYWRIGHT_HEADLESS
+    global _PLAYWRIGHT_OWNER_THREAD_ID
 
     with _BROWSER_FALLBACK_LOCK:
         try:
@@ -340,6 +450,7 @@ def close_browser_session() -> None:
         finally:
             _PLAYWRIGHT_INSTANCE = None
             _PLAYWRIGHT_HEADLESS = None
+            _PLAYWRIGHT_OWNER_THREAD_ID = None
 
 
 # ---------------------------------------------------------------------------
@@ -432,6 +543,37 @@ def _extract_candidate_image_urls(html: str) -> list[str]:
     return clean
 
 
+def _extract_discogs_image_urls(html: str) -> list[str]:
+    """Extract and prioritize Discogs CDN image URLs from Google payloads."""
+    urls: list[str] = []
+
+    for match in _DISCOGS_IMAGE_URL_PATTERN.finditer(html):
+        raw = match.group(0)
+        normalized = raw.replace("\\/", "/")
+        normalized = html_lib.unescape(normalized)
+        urls.append(normalized)
+
+    for candidate in _extract_candidate_image_urls(html):
+        if _is_discogs_image_url(candidate):
+            urls.append(candidate)
+
+    # Prefer i.discogs.com over generic img.discogs.com and keep order stable.
+    seen: set[str] = set()
+    preferred: list[str] = []
+    secondary: list[str] = []
+    for url in urls:
+        cleaned = url.strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        if "i.discogs.com/" in cleaned.lower():
+            preferred.append(cleaned)
+        else:
+            secondary.append(cleaned)
+
+    return preferred + secondary
+
+
 def _download_image_url(
     image_url: str,
     base_headers: dict[str, str],
@@ -441,7 +583,7 @@ def _download_image_url(
     """Download fallback direct image URL and return bytes if plausible."""
     image_headers = dict(base_headers)
     image_headers["Accept"] = "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
-    image_headers["Referer"] = "https://www.google.com/"
+    image_headers["Referer"] = "https://www.discogs.com/" if _is_discogs_image_url(image_url) else "https://www.google.com/"
     session = session or _get_thread_session()
     try:
         response = session.get(image_url, headers=image_headers, timeout=15, allow_redirects=True)
@@ -458,6 +600,11 @@ def _download_image_url(
     if min_image_bytes <= len(raw) <= 6_000_000:
         return raw
     return None
+
+
+def _is_discogs_image_url(url: str) -> bool:
+    lowered = (url or "").lower()
+    return "i.discogs.com/" in lowered or "img.discogs.com/" in lowered
 
 
 def _normalize_b64_string(data: str) -> str:
@@ -573,6 +720,7 @@ def _fetch_cover_via_browser(
     query: str,
     min_image_bytes: int,
     dump_html_path: Optional[Path],
+    discogs_hq: bool,
     final_html_path: Optional[Path],
     final_html_format: str,
     attempt: int,
@@ -597,8 +745,9 @@ def _fetch_cover_via_browser(
 
     page = None
     close_page_on_exit = True
+    allow_persistent_reuse = reuse_browser_session and _can_reuse_persistent_browser_on_current_thread()
     try:
-        if reuse_browser_session:
+        if allow_persistent_reuse:
             page = _get_or_create_persistent_page(headless=headless)
             close_page_on_exit = False
             page.goto(prepared_url, wait_until="domcontentloaded", timeout=45_000)
@@ -608,6 +757,7 @@ def _fetch_cover_via_browser(
                 query=query,
                 min_image_bytes=min_image_bytes,
                 dump_html_path=dump_html_path,
+                discogs_hq=discogs_hq,
                 final_html_path=final_html_path,
                 final_html_format=final_html_format,
                 attempt=attempt,
@@ -632,6 +782,7 @@ def _fetch_cover_via_browser(
                 query=query,
                 min_image_bytes=min_image_bytes,
                 dump_html_path=dump_html_path,
+                discogs_hq=discogs_hq,
                 final_html_path=final_html_path,
                 final_html_format=final_html_format,
                 attempt=attempt,
@@ -659,6 +810,7 @@ def _extract_image_from_browser_page(
                 query: str,
                 min_image_bytes: int,
                 dump_html_path: Optional[Path],
+                discogs_hq: bool,
                 final_html_path: Optional[Path],
                 final_html_format: str,
                 attempt: int,
@@ -755,6 +907,37 @@ def _extract_image_from_browser_page(
 
                 logger.debug("Extracted %d bytes of HTML after CAPTCHA/load", len(html))
 
+                if discogs_hq:
+                    headers = _build_headers(referrer="https://www.google.com/")
+                    discogs_candidates = _extract_discogs_image_urls(html)
+                    for image_url in _extract_browser_image_sources(page):
+                        if _is_discogs_image_url(image_url):
+                            discogs_candidates.append(image_url)
+
+                    if discogs_candidates:
+                        logger.info("Discogs HQ candidates found in browser page: %d", len(discogs_candidates))
+
+                    # Deduplicate while preserving priority order.
+                    seen_discogs: set[str] = set()
+                    deduped_discogs: list[str] = []
+                    for image_url in discogs_candidates:
+                        if image_url and image_url not in seen_discogs:
+                            seen_discogs.add(image_url)
+                            deduped_discogs.append(image_url)
+
+                    for image_url in deduped_discogs[:30]:
+                        logger.debug("Trying Discogs HQ browser URL: %s", image_url)
+                        image_bytes = _download_image_url(image_url, headers, min_image_bytes)
+                        if image_bytes:
+                            _save_final_google_snapshot(
+                                final_html_path,
+                                page=page,
+                                html_fallback=html,
+                                output_format=final_html_format,
+                            )
+                            logger.info("Downloaded Discogs HQ image from browser URL (%d bytes)", len(image_bytes))
+                            return image_bytes
+
                 image_bytes = _extract_first_thumbnail(html, min_image_bytes)
                 if image_bytes:
                     _save_final_google_snapshot(
@@ -820,6 +1003,7 @@ def _extract_image_from_browser_page(
 def _get_or_create_persistent_context(headless: bool):
                 """Create or return a persistent browser context reused across rows."""
                 global _PLAYWRIGHT_INSTANCE, _PLAYWRIGHT_BROWSER, _PLAYWRIGHT_CONTEXT, _PLAYWRIGHT_HEADLESS
+                global _PLAYWRIGHT_OWNER_THREAD_ID
 
                 if _PLAYWRIGHT_CONTEXT is not None and _PLAYWRIGHT_HEADLESS == headless:
                     return _PLAYWRIGHT_CONTEXT
@@ -835,8 +1019,26 @@ def _get_or_create_persistent_context(headless: bool):
                     viewport={"width": 1440, "height": 1080},
                 )
                 _PLAYWRIGHT_HEADLESS = headless
+                _PLAYWRIGHT_OWNER_THREAD_ID = threading.get_ident()
                 logger.info("Started persistent browser session for fallback scraping")
                 return _PLAYWRIGHT_CONTEXT
+
+
+def _can_reuse_persistent_browser_on_current_thread() -> bool:
+                """Return True only when current thread owns the persistent Playwright objects."""
+                if _PLAYWRIGHT_CONTEXT is None:
+                    return True
+
+                current_thread_id = threading.get_ident()
+                if _PLAYWRIGHT_OWNER_THREAD_ID in (None, current_thread_id):
+                    return True
+
+                logger.debug(
+                    "Skipping persistent browser reuse on thread %s; owner thread is %s",
+                    current_thread_id,
+                    _PLAYWRIGHT_OWNER_THREAD_ID,
+                )
+                return False
 
 
 def _get_or_create_persistent_page(headless: bool):

@@ -13,6 +13,7 @@ Design goals
 from __future__ import annotations
 
 import csv
+from copy import copy
 import logging
 import os
 import re
@@ -340,7 +341,11 @@ def _update_excel_rows(path: Path, updates: list[tuple[int, str]]) -> None:
             if sheet_row > ws.max_row:
                 raise IndexError(f"Row index {row_index} out of range ({max(0, ws.max_row - 1)} rows)")
 
-            ws.cell(row=sheet_row, column=image_col_idx, value=image_filename)
+            cell = ws.cell(row=sheet_row, column=image_col_idx)
+            original_style = _resolve_cell_style_template(ws, sheet_row, image_col_idx)
+            cell.value = image_filename
+            if original_style is not None:
+                cell._style = original_style
 
         fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=".tmp_", suffix=path.suffix)
         os.close(fd)
@@ -379,6 +384,32 @@ def _replace_with_retries(tmp_path: Path, target_path: Path, retries: int = 3, d
     raise PermissionError(
         f"Could not update spreadsheet {target_path}. It may be open in Excel or locked by another process."
     ) from last_error
+
+
+def _resolve_cell_style_template(ws: Any, row: int, col: int) -> Any | None:
+    """Return a style template for a target cell, preferring same-row styles.
+
+    Excel files often use row/table styling where the target image cell itself has no
+    explicit style assigned yet. In that case we inherit style from another styled
+    cell in the same row so writing a value does not visually change formatting.
+    """
+    target = ws.cell(row=row, column=col)
+    if target.has_style:
+        return copy(target._style)
+
+    for probe_col in range(1, ws.max_column + 1):
+        probe = ws.cell(row=row, column=probe_col)
+        if probe.has_style:
+            return copy(probe._style)
+
+    for probe_row in (row - 1, row + 1):
+        if probe_row < 1 or probe_row > ws.max_row:
+            continue
+        probe = ws.cell(row=probe_row, column=col)
+        if probe.has_style:
+            return copy(probe._style)
+
+    return None
 
 
 def _read_excel_headers(path: Path) -> list[str]:

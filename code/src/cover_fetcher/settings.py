@@ -1,0 +1,17 @@
+"""Settings and constants for cover_fetcher."""
+
+from __future__ import annotations
+
+# Country code to country name equivalences for query enrichment
+COUNTRY_EQUIVALENCES = {
+    "SP": "Spain",
+    "UK": "England",
+    "DE": "Germany",
+    "IT": "Italy",
+    "US": "Usa",
+    "FR": "France",
+    "CA": "Canada",
+    "JP": "Japan",
+    "BE": "Belgium",
+    "NL": "Netherlands"
+}

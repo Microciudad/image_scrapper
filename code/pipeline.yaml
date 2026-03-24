@@ -23,6 +23,11 @@
 #   rotate
 #     degrees (float)   – clockwise rotation angle.  Default: 0.
 #     expand  (bool)    – expand canvas to fit the rotated image.  Default: true.
+#     fill    (str|list) – fill color for exposed corners after rotation.
+#                          Use `border` / `edge` / `auto` to sample the dominant
+#                          outer border color from the image.
+#                          Use `#RRGGBB` for an explicit color.
+#                          Use `[r, g, b]` for explicit RGB.
 #
 #   auto_brightness
 #     clip_percent (float) – percentage of pixels to clip at each end of the
@@ -190,8 +195,10 @@ pipeline:
     strength: 0.85   # 0.0 = original, 1.0 = full filter
 
   - step: rotate
-    degrees: {random: [-2, 2]}  # random tilt per image; use a fixed number to disable
-    expand: true    
+    degrees: {random: [1, 1]}  # random tilt per image; use a fixed number to disable    
+    expand: false
+    fill: border
+
   - step: auto_brightness
     clip_percent: 0.2
 
@@ -218,9 +225,8 @@ pipeline:
 
   - step: zoom
     factor: {random: [1.0, 1.12]}
-    center_x: 0.0
-    center_y: 0.0
-
+    center_x: {random: [0.45, 0.55]}
+    center_y: {random: [0.45, 0.55]}
 
   - step: distress
     scratches: {random: [0, 3]}     # ← different count every image
@@ -232,14 +238,14 @@ pipeline:
   #- step: stop
 
   - step: resize
-    width: 280
-    height: 280
+    width: 380
+    height: 380
     keep_aspect: true
     unsharp_radius: 1.5
     unsharp_percent: 120
     unsharp_threshold: 3
 
   - step: jpeg
-    quality: 70       # 1..100 (lower = more compression, smaller files)
+    quality: 60       # 1..100 (lower = more compression, smaller files)
     optimize: true    # smaller output, slightly slower
     progressive: true # progressive JPEG

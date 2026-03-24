@@ -38,6 +38,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskPr
 from cover_fetcher import scraper
 from cover_fetcher import csv_handler
 from cover_fetcher import processor
+from cover_fetcher.settings import COUNTRY_EQUIVALENCES
 
 app = typer.Typer(
     name="cover-fetcher",
@@ -116,6 +117,11 @@ def run(
     format_col: str = typer.Option("format", "--format-col", help="CSV column name for format."),
     label_col: str = typer.Option("label", "--label-col", help="CSV column name for label."),
     year_col: str = typer.Option("year", "--year-col", help="CSV column name for year."),
+    country_col: str = typer.Option(
+        "ED",
+        "--country-col",
+        help="CSV/XLSX column name for edition country/region code (for example ED).",
+    ),
     max_retries: int = typer.Option(3, "--max-retries", help="Number of Google fetch retries per row."),
     retry_delay: float = typer.Option(2.0, "--retry-delay", help="Base delay (seconds) between retries."),
     workers: int = typer.Option(
@@ -182,6 +188,14 @@ def run(
             "Disable to force HTTP-only scraping for concurrent runs."
         ),
     ),
+    discogs_hq: bool = typer.Option(
+        False,
+        "--discogs-hq/--no-discogs-hq",
+        help=(
+            "Enable deep Discogs mode: prioritize high-resolution Discogs CDN image URLs "
+            "from Google Images result payloads and rendered page sources."
+        ),
+    ),
     browser_headless: bool = typer.Option(
         True,
         "--browser-headless/--browser-visible",
@@ -223,6 +237,7 @@ def run(
 
     _configure_logging(verbose)
     log = logging.getLogger(__name__)
+    country_map = COUNTRY_EQUIVALENCES
     resolved_cooldown_base, resolved_cooldown_max = _resolve_captcha_cooldown_bounds(
         captcha_cooldown_range,
         captcha_cooldown_base,
@@ -264,7 +279,8 @@ def run(
         raise typer.BadParameter(str(exc)) from exc
 
     effective_browser_fallback = browser_fallback and (workers == 1 or browser_fallback_single_lane)
-    effective_reuse_browser_session = reuse_browser_session and effective_browser_fallback and workers == 1
+    # Reusing one guarded browser session preserves solved-CAPTCHA cookies even with multi-worker HTTP fetching.
+    effective_reuse_browser_session = reuse_browser_session and effective_browser_fallback
     persisted_pending_updates = _load_persisted_pending_updates(csv_path, output_dir, log)
     if persisted_pending_updates:
         recovered_count = len(persisted_pending_updates)
@@ -278,10 +294,16 @@ def run(
 
     if workers > 1 and browser_fallback:
         if browser_fallback_single_lane:
-            console.print(
-                "[yellow]Concurrency enabled:[/] browser fallback is restricted to one guarded lane with a fresh "
-                "browser per fallback while HTTP fetching continues in parallel."
-            )
+            if effective_reuse_browser_session:
+                console.print(
+                    "[yellow]Concurrency enabled:[/] browser fallback is restricted to one guarded lane, "
+                    "reusing a shared browser session while HTTP fetching continues in parallel."
+                )
+            else:
+                console.print(
+                    "[yellow]Concurrency enabled:[/] browser fallback is restricted to one guarded lane with a fresh "
+                    "browser per fallback while HTTP fetching continues in parallel."
+                )
         else:
             console.print(
                 "[yellow]Concurrency enabled:[/] browser fallback is disabled when using more than one worker."
@@ -310,12 +332,22 @@ def run(
                 console.print(f"[dim]Preparing jobs from pending rows:[/] {scanned_pending_rows} checked")
 
             artist, title, year, format_, label = _extract_query_fields(row)
+            edition_country = _translate_country(_extract_country_value(row, country_col), country_map)
             expected_filename = csv_handler.build_image_filename(artist, title, format_)
             existing_image_value = _get_row_image_value(row)
             persisted_image_value = persisted_pending_updates.get(row_index, "")
             has_meaningful_expected_name = expected_filename != ".jpg" and any(
                 field.strip() for field in (artist, title, format_)
             )
+            existing_disk_filename = _find_existing_image_filename(existing_output_names, artist, title, format_)
+
+            if (
+                not existing_image_value
+                and has_meaningful_expected_name
+                and existing_disk_filename
+            ):
+                auto_fill_updates[row_index] = existing_disk_filename
+                continue
 
             if (
                 not existing_image_value
@@ -323,14 +355,6 @@ def run(
                 and (output_dir / persisted_image_value).is_file()
             ):
                 auto_fill_updates[row_index] = persisted_image_value
-                continue
-
-            if (
-                not existing_image_value
-                and has_meaningful_expected_name
-                and expected_filename in existing_output_names
-            ):
-                auto_fill_updates[row_index] = expected_filename
                 continue
 
             filename = csv_handler.reserve_unique_filename(
@@ -357,6 +381,7 @@ def run(
                     "year": year,
                     "format": format_,
                     "label": label,
+                    "edition_country": edition_country,
                     "filename": filename,
                     "dest": dest,
                     "final_google_html_path": final_google_html_path,
@@ -401,7 +426,15 @@ def run(
             else None
         )
 
-        query = scraper.build_query(job["artist"], job["title"], job["format"], job["label"], job["year"], marketplace)
+        query = scraper.build_query(
+            job["artist"],
+            job["title"],
+            job["format"],
+            job["label"],
+            job["year"],
+            marketplace,
+            edition_country=job.get("edition_country", ""),
+        )
         log.debug("Query: %r", query)
 
         image_bytes = scraper.fetch_cover(
@@ -409,6 +442,7 @@ def run(
             max_retries=max_retries,
             retry_delay=retry_delay,
             dump_html_path=dump_google_html,
+            discogs_hq=discogs_hq,
             browser_fallback=effective_browser_fallback,
             browser_headless=browser_headless,
             captcha_wait_seconds=captcha_wait_timeout,
@@ -859,6 +893,29 @@ def _split_semicolon_row(payload: str) -> list[str]:
     return [(value or "").strip() for value in row]
 
 
+def _extract_country_value(row: dict, country_col: str) -> str:
+    """Extract raw country/edition code from configured column or packed payload."""
+    direct = _first_segment(_row_get(row, country_col))
+    if direct:
+        return direct
+
+    payload = _find_semicolon_payload(row)
+    if payload:
+        columns = _split_semicolon_row(payload)
+        # Legacy row shape: Band;Title;;year;FORMAT;Label;RC;PC C;ED;...
+        if len(columns) >= 9:
+            return _first_segment(columns[8])
+    return ""
+
+
+def _translate_country(raw_country: str, mapping: dict[str, str]) -> str:
+    """Translate raw country code using mapping; return empty when unmapped."""
+    key = (raw_country or "").strip().upper()
+    if not key:
+        return ""
+    return mapping.get(key, "")
+
+
 def _first_segment(value: str) -> str:
     """Keep only the first cell-like segment to prevent column leakage."""
     text = (value or "").strip()
@@ -866,6 +923,47 @@ def _first_segment(value: str) -> str:
         if delim in text:
             text = text.split(delim, 1)[0].strip()
     return text
+
+
+def _find_existing_image_filename(
+    existing_output_names: set[str],
+    artist: str,
+    title: str,
+    format_: str,
+) -> str:
+    """Return best matching existing filename, preferring names without format suffix."""
+    base_no_format = csv_handler.build_image_filename(artist, title, "")
+    match = _find_existing_name_for_base(existing_output_names, base_no_format)
+    if match:
+        return match
+
+    base_with_format = csv_handler.build_image_filename(artist, title, format_)
+    match = _find_existing_name_for_base(existing_output_names, base_with_format)
+    if match:
+        return match
+
+    return ""
+
+
+def _find_existing_name_for_base(existing_output_names: set[str], base_filename: str) -> str:
+    """Find exact or suffixed existing filename for a normalized base filename."""
+    if not base_filename or base_filename == ".jpg":
+        return ""
+
+    if base_filename in existing_output_names:
+        return base_filename
+
+    base_stem = Path(base_filename).stem
+    base_suffix = Path(base_filename).suffix or ".jpg"
+    prefix = f"{base_stem}_"
+    candidates = sorted(
+        name
+        for name in existing_output_names
+        if name.endswith(base_suffix)
+        and name.startswith(prefix)
+        and name[len(prefix):-len(base_suffix)].isdigit()
+    )
+    return candidates[0] if candidates else ""
 
 
 # ---------------------------------------------------------------------------

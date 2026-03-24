@@ -24,6 +24,7 @@ Each step is represented as a mapping in the ``pipeline`` list of the YAML::
 
 from __future__ import annotations
 
+from collections import Counter
 import logging
 from pathlib import Path
 from typing import Any
@@ -173,7 +174,59 @@ def _rotate(img: PILImage, cfg: dict[str, Any]) -> PILImage:
         return img
     # Pillow rotates counter-clockwise; negate for clockwise semantics
     expand = bool(cfg.get("expand", True))
-    return img.rotate(-degrees, expand=expand)
+    fillcolor = _resolve_rotate_fillcolor(img, cfg)
+    return img.rotate(-degrees, expand=expand, fillcolor=fillcolor)
+
+
+def _resolve_rotate_fillcolor(img: PILImage, cfg: dict[str, Any]) -> tuple[int, int, int] | None:
+    """Resolve rotate fill color from config.
+
+    Supported values:
+    - omitted / none: keep Pillow default behavior (black for RGB images)
+    - border / edge / auto: use dominant outer border color from the source image
+    - #RRGGBB: explicit hex color
+    - [r, g, b]: explicit RGB sequence
+    """
+    fill = cfg.get("fill")
+    if fill in (None, "", "none"):
+        return None
+
+    if isinstance(fill, str):
+        lowered = fill.strip().lower()
+        if lowered in {"border", "edge", "auto"}:
+            return _dominant_border_color(img)
+        if lowered.startswith("#") and len(lowered) == 7:
+            return tuple(int(lowered[index:index + 2], 16) for index in (1, 3, 5))
+
+    if isinstance(fill, (list, tuple)) and len(fill) == 3:
+        return tuple(max(0, min(255, int(value))) for value in fill)
+
+    logger.warning("Unsupported rotate fill value %r; using default fill", fill)
+    return None
+
+
+def _dominant_border_color(img: PILImage) -> tuple[int, int, int]:
+    """Return the most common color found on the image perimeter."""
+    rgb = img.convert("RGB")
+    width, height = rgb.size
+    if width <= 0 or height <= 0:
+        return (0, 0, 0)
+
+    sample_step = max(1, min(width, height) // 200)
+    border_pixels: list[tuple[int, int, int]] = []
+
+    for x in range(0, width, sample_step):
+        border_pixels.append(rgb.getpixel((x, 0)))
+        border_pixels.append(rgb.getpixel((x, height - 1)))
+
+    for y in range(0, height, sample_step):
+        border_pixels.append(rgb.getpixel((0, y)))
+        border_pixels.append(rgb.getpixel((width - 1, y)))
+
+    if not border_pixels:
+        return (0, 0, 0)
+
+    return Counter(border_pixels).most_common(1)[0][0]
 
 
 def _auto_brightness(img: PILImage, cfg: dict[str, Any]) -> PILImage:

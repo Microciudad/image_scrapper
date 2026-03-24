@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 import pytest
 import typer
 
-from cover_fetcher.cli import _extract_query_fields, _get_row_image_value, _resolve_captcha_cooldown_bounds
+from cover_fetcher.cli import (
+    _extract_country_value,
+    _extract_query_fields,
+    _find_existing_image_filename,
+    _get_row_image_value,
+    _resolve_captcha_cooldown_bounds,
+    _translate_country,
+)
 from cover_fetcher import csv_handler
 
 
@@ -72,3 +80,49 @@ def test_resolve_captcha_cooldown_bounds_from_range():
 def test_resolve_captcha_cooldown_bounds_rejects_bad_range():
     with pytest.raises(typer.BadParameter):
         _resolve_captcha_cooldown_bounds("50-1", 5, 25)
+
+
+def test_find_existing_image_filename_prefers_no_format_name():
+    existing = {
+        "Martika_Toy_Soldiers.jpg",
+        "Martika_Toy_Soldiers_12.jpg",
+    }
+    matched = _find_existing_image_filename(existing, "Martika", "Toy Soldiers", "12")
+    assert matched == "Martika_Toy_Soldiers.jpg"
+
+
+def test_find_existing_image_filename_falls_back_to_format_name():
+    existing = {
+        "Martika_Toy_Soldiers_12.jpg",
+    }
+    matched = _find_existing_image_filename(existing, "Martika", "Toy Soldiers", "12")
+    assert matched == "Martika_Toy_Soldiers_12.jpg"
+
+
+def test_find_existing_image_filename_still_prefers_no_format_when_both_exist():
+    existing = {
+        "Martika_Toy_Soldiers.jpg",
+        "Martika_Toy_Soldiers_12.jpg",
+        "Martika_Toy_Soldiers_12_2.jpg",
+    }
+    matched = _find_existing_image_filename(existing, "Martika", "Toy Soldiers", "12")
+    assert matched == "Martika_Toy_Soldiers.jpg"
+
+
+def test_translate_country_returns_empty_for_unmapped_values():
+    assert _translate_country("ZZ", {"SP": "Spain"}) == ""
+
+
+def test_extract_country_value_reads_from_packed_semicolon_row():
+    row = {
+        "Band;Title;;year;FORMAT;Label;RC;PC C;ED;Precio": "A;B;;91;12;L;EX;EX;SP;4",
+    }
+    assert _extract_country_value(row, "ED") == "SP"
+
+
+def test_country_equivalences_settings_available():
+    from cover_fetcher.settings import COUNTRY_EQUIVALENCES
+    assert COUNTRY_EQUIVALENCES["SP"] == "Spain"
+    assert COUNTRY_EQUIVALENCES["DE"] == "Germany"
+    assert COUNTRY_EQUIVALENCES["UK"] == "England"
+

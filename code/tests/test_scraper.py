@@ -39,6 +39,11 @@ def test_build_query_empty_fields_skipped():
     assert "__" not in q  # no double spaces from empty fields
 
 
+def test_build_query_includes_edition_country_when_present():
+    q = build_query("Artist", "Title", "LP", "Label", "2000", edition_country="Spain")
+    assert "Spain" in q
+
+
 def test_build_query_sanitizes_quotes_slashes_and_dashes():
     q = build_query('2-Lux', '"25/Go !!!"', '12\"', 'A/B', "91-12", "discogs")
     assert '"' not in q

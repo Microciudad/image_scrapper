@@ -85,6 +85,29 @@ def test_apply_pipeline_rotate_0_unchanged_size():
     assert img.size == (60, 40)
 
 
+def test_apply_pipeline_rotate_border_fill_uses_edge_color():
+    img = Image.new("RGB", (120, 120), color=(255, 255, 255))
+    for x in range(20, 100):
+        for y in range(20, 100):
+            img.putpixel((x, y), (10, 10, 10))
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+
+    result = apply_pipeline(buf.getvalue(), [{"step": "rotate", "degrees": 8, "expand": True, "fill": "border"}])
+    rotated = Image.open(io.BytesIO(result)).convert("RGB")
+    corner = rotated.getpixel((0, 0))
+    assert all(channel >= 240 for channel in corner)
+
+
+def test_apply_pipeline_rotate_hex_fill_uses_explicit_color():
+    raw = _make_jpeg_bytes(width=100, height=100)
+    result = apply_pipeline(raw, [{"step": "rotate", "degrees": 8, "expand": True, "fill": "#ffffff"}])
+    rotated = Image.open(io.BytesIO(result)).convert("RGB")
+    corner = rotated.getpixel((0, 0))
+    assert all(channel >= 240 for channel in corner)
+
+
 def test_apply_pipeline_unknown_step_does_not_raise():
     raw = _make_jpeg_bytes()
     steps = [{"step": "nonexistent_step"}]
