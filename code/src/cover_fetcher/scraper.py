@@ -38,8 +38,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _GOOGLE_IMAGES_URL = "https://www.google.com/search"
-_MIN_REQUEST_DELAY_SECONDS = 1.0
-_MAX_REQUEST_DELAY_SECONDS = 3.5
+_MIN_REQUEST_DELAY_SECONDS = 0.5
+_MAX_REQUEST_DELAY_SECONDS = 1.75
 _BROWSER_WAIT_MS = 2500
 _CAPTCHA_COOLDOWN_BASE_SECONDS = 5
 _CAPTCHA_COOLDOWN_MAX_SECONDS = 25
@@ -147,6 +147,7 @@ def fetch_cover(
     reuse_browser_session: bool = True,
     captcha_cooldown_base_seconds: int = _CAPTCHA_COOLDOWN_BASE_SECONDS,
     captcha_cooldown_max_seconds: int = _CAPTCHA_COOLDOWN_MAX_SECONDS,
+    request_label: str = "",
 ) -> Optional[bytes]:
     """Search Google Images and return the first valid thumbnail as raw bytes.
 
@@ -171,6 +172,7 @@ def fetch_cover(
             cookies/session and reduce challenge frequency.
         captcha_cooldown_base_seconds: Initial cooldown after each block/CAPTCHA.
         captcha_cooldown_max_seconds: Maximum adaptive cooldown after repeated blocks.
+        request_label: Optional human-readable worker/job label for logging.
 
     Returns:
         Raw image bytes, or ``None`` if no suitable image was found.
@@ -190,7 +192,10 @@ def fetch_cover(
                 headers = _build_headers(referrer="https://www.google.com/")
                 params = _build_search_params(search_query)
                 prepared_url = requests.Request("GET", _GOOGLE_IMAGES_URL, params=params).prepare().url
-                logger.info("Google request URL: %s", prepared_url)
+                if request_label:
+                    logger.info("Google request URL for %s: %s", request_label, prepared_url)
+                else:
+                    logger.info("Google request URL: %s", prepared_url)
                 logger.debug("GET %s  q=%r  (variant %r attempt %d)", _GOOGLE_IMAGES_URL, search_query, search_query, attempt)
                 response = session.get(
                     _GOOGLE_IMAGES_URL,
@@ -228,7 +233,13 @@ def fetch_cover(
 
                 if blocked_response:
                     if browser_fallback:
-                        logger.info("Google challenged the HTTP client; falling back to a real browser session")
+                        if request_label:
+                            logger.info(
+                                "Google challenged the HTTP client for %s; falling back to a real browser session",
+                                request_label,
+                            )
+                        else:
+                            logger.info("Google challenged the HTTP client; falling back to a real browser session")
                         with _BROWSER_FALLBACK_LOCK:
                             image_bytes = _fetch_cover_via_browser(
                                 search_query,
@@ -242,6 +253,7 @@ def fetch_cover(
                                 reuse_browser_session=reuse_browser_session,
                                 captcha_cooldown_base_seconds=captcha_cooldown_base_seconds,
                                 captcha_cooldown_max_seconds=captcha_cooldown_max_seconds,
+                                request_label=request_label,
                             )
                         if image_bytes:
                             return image_bytes
@@ -283,7 +295,7 @@ def fetch_cover(
                 logger.warning("Request error on attempt %d for query %r: %s", attempt, search_query, exc)
 
             if attempt < max_retries:
-                delay = retry_delay * attempt + random.uniform(0.5, 1.5)
+                delay = retry_delay * attempt + random.uniform(0.25, 0.75)
                 logger.debug("Waiting %.1f s before retry", delay)
                 time.sleep(delay)
 
@@ -530,7 +542,7 @@ def _build_search_params(query: str) -> dict[str, str | int]:
     """Build Google Images params using the same randomization strategy as the sample scraper."""
     params: dict[str, str | int] = {
         "q": query,
-        "udm": "2",
+        "tbm": "isch",
         "hl": random.choice(_QUERY_LANGUAGE_POOL),
     }
 
@@ -569,6 +581,7 @@ def _fetch_cover_via_browser(
     reuse_browser_session: bool = True,
     captcha_cooldown_base_seconds: int = _CAPTCHA_COOLDOWN_BASE_SECONDS,
     captcha_cooldown_max_seconds: int = _CAPTCHA_COOLDOWN_MAX_SECONDS,
+    request_label: str = "",
 ) -> Optional[bytes]:
     """Fetch thumbnails via a real browser when Google challenges requests."""
     if sync_playwright is None:
@@ -577,7 +590,10 @@ def _fetch_cover_via_browser(
 
     params = _build_search_params(query)
     prepared_url = requests.Request("GET", _GOOGLE_IMAGES_URL, params=params).prepare().url
-    logger.info("Browser fallback URL: %s", prepared_url)
+    if request_label:
+        logger.info("Browser fallback URL for %s: %s", request_label, prepared_url)
+    else:
+        logger.info("Browser fallback URL: %s", prepared_url)
 
     page = None
     close_page_on_exit = True
@@ -598,6 +614,7 @@ def _fetch_cover_via_browser(
                 captcha_wait_seconds=captcha_wait_seconds,
                 captcha_cooldown_base_seconds=captcha_cooldown_base_seconds,
                 captcha_cooldown_max_seconds=captcha_cooldown_max_seconds,
+                request_label=request_label,
             )
 
         with sync_playwright() as playwright:
@@ -621,6 +638,7 @@ def _fetch_cover_via_browser(
                 captcha_wait_seconds=captcha_wait_seconds,
                 captcha_cooldown_base_seconds=captcha_cooldown_base_seconds,
                 captcha_cooldown_max_seconds=captcha_cooldown_max_seconds,
+                request_label=request_label,
             )
     except PlaywrightError as exc:
         logger.warning("Browser fallback encountered an error: %s", exc)
@@ -647,6 +665,7 @@ def _extract_image_from_browser_page(
                 captcha_wait_seconds: int,
                 captcha_cooldown_base_seconds: int,
                 captcha_cooldown_max_seconds: int,
+                request_label: str,
             ) -> Optional[bytes]:
                 """Extract image bytes from a loaded browser page, with CAPTCHA handling."""
                 if _has_captcha(page.content(), page):
@@ -655,19 +674,27 @@ def _extract_image_from_browser_page(
                         base_seconds=captcha_cooldown_base_seconds,
                         max_seconds=captcha_cooldown_max_seconds,
                     )
-                    logger.warning("Google CAPTCHA detected. Keeping browser window open for manual intervention.")
+                    label_text = f" for {request_label}" if request_label else ""
+                    logger.warning(
+                        "Google CAPTCHA detected%s. Keeping browser window open for manual intervention.",
+                        label_text,
+                    )
                     console = None
                     try:
                         from rich.console import Console
 
                         console = Console()
                         console.print("[bold yellow]⚠️  CAPTCHA DETECTED[/]")
+                        if request_label:
+                            console.print(f"[yellow]Worker waiting:[/] {request_label}")
                         console.print("[yellow]1. Solve the CAPTCHA in the browser window[/]")
                         console.print("[yellow]2. Once you see images appear, press ENTER in this terminal[/]")
                         console.print(f"[yellow]   OR wait for automatic detection (up to {captcha_wait_seconds}s)[/]")
                         console.print("[dim](The script will monitor and continue when ready)[/]")
                     except Exception:
                         print("⚠️  CAPTCHA DETECTED.")
+                        if request_label:
+                            print(f"Worker waiting: {request_label}")
                         print("1. Solve the CAPTCHA in the browser window")
                         print(f"2. Press ENTER here to continue, or wait up to {captcha_wait_seconds}s for auto-detection")
 
@@ -679,7 +706,10 @@ def _extract_image_from_browser_page(
                         try:
                             input()
                             user_pressed_enter = True
-                            logger.info("User signaled CAPTCHA solved via Enter key")
+                            if request_label:
+                                logger.info("User signaled CAPTCHA solved via Enter key for %s", request_label)
+                            else:
+                                logger.info("User signaled CAPTCHA solved via Enter key")
                         except Exception:
                             pass
 
@@ -687,10 +717,13 @@ def _extract_image_from_browser_page(
                     signal_thread.start()
 
                     remaining_wait = captcha_wait_seconds
-                    poll_interval = 2
+                    poll_interval = 10
                     while remaining_wait > 0 and not captcha_cleared:
                         if user_pressed_enter:
-                            logger.info("User manually signaled - proceeding with page as-is")
+                            if request_label:
+                                logger.info("User manually signaled - proceeding with page as-is for %s", request_label)
+                            else:
+                                logger.info("User manually signaled - proceeding with page as-is")
                             captcha_cleared = True
                             break
 
@@ -698,12 +731,18 @@ def _extract_image_from_browser_page(
                         remaining_wait -= poll_interval
 
                     if not captcha_cleared and not user_pressed_enter:
-                        logger.warning("CAPTCHA solve timeout or user did not complete it.")
+                        if request_label:
+                            logger.warning("CAPTCHA solve timeout or user did not complete it for %s.", request_label)
+                        else:
+                            logger.warning("CAPTCHA solve timeout or user did not complete it.")
                         if console:
                             console.print("[red]Timeout reached. Proceeding with current page state...[/]")
                         page.wait_for_timeout(2_000)
 
-                    logger.info("CAPTCHA appears to be solved. Waiting for page to fully load...")
+                    if request_label:
+                        logger.info("CAPTCHA appears to be solved for %s. Waiting for page to fully load...", request_label)
+                    else:
+                        logger.info("CAPTCHA appears to be solved. Waiting for page to fully load...")
                     _wait_for_images_to_render(page, timeout_ms=10_000)
                     page.wait_for_timeout(2_000)
 
@@ -832,7 +871,8 @@ def _register_captcha_or_block_event(source: str, base_seconds: int, max_seconds
 
                 with _STATE_LOCK:
                     _CAPTCHA_EVENT_COUNT += 1
-                    cooldown = min(max_seconds, max(base_seconds, base_seconds * _CAPTCHA_EVENT_COUNT))
+                    adaptive_max = min(max_seconds, max(base_seconds, base_seconds * _CAPTCHA_EVENT_COUNT))
+                    cooldown = random.randint(base_seconds, adaptive_max)
                     _CAPTCHA_COOLDOWN_UNTIL = max(_CAPTCHA_COOLDOWN_UNTIL, time.time() + float(cooldown))
                 logger.warning(
                     "Adaptive cooldown triggered by %s: %ds (event #%d)",

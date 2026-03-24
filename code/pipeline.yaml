@@ -118,6 +118,15 @@
 #     width  (int)         – target width in pixels.  Default: 500.
 #     height (int)         – target height (defaults to width, i.e. square).
 #     keep_aspect (bool)   – preserve aspect ratio and pad with black. Default: true.
+#
+#   jpeg
+#     Controls final output JPEG encoding.
+#
+#     quality (int)        – JPEG quality in [1,100]. Lower = more compression,
+#                            smaller files. Default: 95.
+#     optimize (bool)      – If true, run Huffman table optimization for smaller
+#                            output size (slightly slower). Default: false.
+#     progressive (bool)   – If true, save as progressive JPEG. Default: false.
 #     unsharp_radius (float) – Controls how wide the sharpening halo is around
 #                              detected edges. Think of it as the "spread" of the
 #                              sharpening effect.
@@ -181,7 +190,7 @@ pipeline:
     strength: 0.85   # 0.0 = original, 1.0 = full filter
 
   - step: rotate
-    degrees: {random: [-3, 3]}  # random tilt per image; use a fixed number to disable
+    degrees: {random: [-2, 2]}  # random tilt per image; use a fixed number to disable
     expand: true    
   - step: auto_brightness
     clip_percent: 0.2
@@ -229,3 +238,8 @@ pipeline:
     unsharp_radius: 1.5
     unsharp_percent: 120
     unsharp_threshold: 3
+
+  - step: jpeg
+    quality: 70       # 1..100 (lower = more compression, smaller files)
+    optimize: true    # smaller output, slightly slower
+    progressive: true # progressive JPEG

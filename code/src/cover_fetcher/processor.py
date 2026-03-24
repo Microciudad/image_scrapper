@@ -9,6 +9,7 @@ Supported pipeline steps
 - ``zoom``          – crop-and-rescale for zoom in/out around a focal point.
 - ``resize``        – upscale (or downscale) to a target size using LANCZOS.
 - ``watermark``     – overlay a semi-transparent watermark image.
+- ``jpeg``          – control final JPEG encoding quality/compression settings.
 
 Each step is represented as a mapping in the ``pipeline`` list of the YAML::
 
@@ -82,6 +83,9 @@ def apply_pipeline(image_bytes: bytes, steps: list[dict[str, Any]]) -> bytes:
     import io
 
     img: PILImage = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    jpeg_quality = 95
+    jpeg_optimize = False
+    jpeg_progressive = False
 
     for step_cfg in steps:
         step = step_cfg.get("step", "")
@@ -108,11 +112,21 @@ def apply_pipeline(image_bytes: bytes, steps: list[dict[str, Any]]) -> bytes:
             img = _resize(img, cfg)
         elif step == "watermark":
             img = _watermark(img, cfg)
+        elif step == "jpeg":
+            jpeg_quality = max(1, min(100, int(cfg.get("quality", jpeg_quality))))
+            jpeg_optimize = bool(cfg.get("optimize", jpeg_optimize))
+            jpeg_progressive = bool(cfg.get("progressive", jpeg_progressive))
         else:
             logger.warning("Unknown pipeline step %r – skipping", step)
 
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=95)
+    img.save(
+        buf,
+        format="JPEG",
+        quality=jpeg_quality,
+        optimize=jpeg_optimize,
+        progressive=jpeg_progressive,
+    )
     return buf.getvalue()
 
 

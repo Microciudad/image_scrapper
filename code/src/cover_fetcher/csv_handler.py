@@ -17,13 +17,17 @@ import logging
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Iterator
+
+from openpyxl import load_workbook
 
 logger = logging.getLogger(__name__)
 
 # The name of the column we add / update
 IMAGE_COLUMN = "image_file"
+EXCEL_IMAGE_COLUMN = "Image"
 
 # Characters not allowed in file-system names
 _UNSAFE_CHARS = re.compile(r'[\\/:*?"<>|]')
@@ -57,10 +61,11 @@ def reserve_unique_filename(
     filename: str,
     output_dir: str | Path,
     reserved_names: set[str],
+    existing_names: set[str] | None = None,
 ) -> str:
     """Return a filename unique across output_dir and reserved_names.
 
-    If ``filename`` already exists on disk or was reserved for another pending
+    If ``filename`` already exists on disk (or in ``existing_names``) or was reserved for another pending
     row in the current run, numeric suffixes ``_2``, ``_3``, ... are appended.
     The chosen name is added to ``reserved_names`` before returning.
     """
@@ -71,17 +76,24 @@ def reserve_unique_filename(
 
     candidate = f"{stem}{suffix}"
     counter = 2
-    while candidate in reserved_names or (output_dir / candidate).exists():
+    while (
+        candidate in reserved_names
+        or (existing_names is not None and candidate in existing_names)
+        or (existing_names is None and (output_dir / candidate).exists())
+    ):
         candidate = f"{stem}_{counter}{suffix}"
         counter += 1
 
     reserved_names.add(candidate)
+    if existing_names is not None:
+        existing_names.add(candidate)
     return candidate
 
 
 def iter_pending_rows(
     csv_path: str | Path,
     output_dir: str | Path,
+    scan_log_every: int = 0,
 ) -> Iterator[tuple[int, dict[str, Any]]]:
     """Yield ``(row_index, row_dict)`` for every row that still needs processing.
 
@@ -92,16 +104,30 @@ def iter_pending_rows(
     Args:
         csv_path: Path to the input / output CSV file.
         output_dir: Folder where downloaded images are stored.
+        scan_log_every: Emit scan progress log every N rows (0 disables).
 
     Yields:
         ``(row_index, row_dict)`` tuples (0-based row index, excluding header).
     """
     csv_path = Path(csv_path)
     output_dir = Path(output_dir)
-    rows = _read_all_rows(csv_path)
+    image_column = _get_image_column(csv_path)
 
+    if _is_excel_path(csv_path):
+        yield from _iter_pending_rows_excel(
+            csv_path,
+            output_dir,
+            image_column,
+            scan_log_every,
+        )
+        return
+
+    rows = _read_all_rows(csv_path)
     for idx, row in enumerate(rows):
-        image_file = (row.get(IMAGE_COLUMN, "") or "").strip()
+        if scan_log_every > 0 and (idx + 1) % scan_log_every == 0:
+            logger.info("Scanning rows... %d checked", idx + 1)
+
+        image_file = (row.get(image_column, "") or "").strip()
         if image_file and (output_dir / image_file).exists():
             logger.debug("Row %d already done (%s) – skipping", idx, image_file)
             continue
@@ -120,15 +146,44 @@ def update_row(
         row_index: 0-based data row index (not counting the header).
         image_filename: Value to write into the ``image_file`` column.
     """
-    csv_path = Path(csv_path)
-    rows = _read_all_rows(csv_path)
+    update_rows(csv_path, {row_index: image_filename})
 
-    if row_index >= len(rows):
-        raise IndexError(f"Row index {row_index} out of range ({len(rows)} rows)")
-
-    rows[row_index][IMAGE_COLUMN] = image_filename
-    _write_all_rows(csv_path, rows)
     logger.debug("Updated row %d → %s", row_index, image_filename)
+
+
+def update_rows(
+    csv_path: str | Path,
+    updates: dict[int, str],
+) -> None:
+    """Set image filename for multiple rows and save atomically.
+
+    Args:
+        csv_path: Path to CSV/XLSX file.
+        updates: Mapping of 0-based row_index to image filename.
+    """
+    if not updates:
+        return
+
+    csv_path = Path(csv_path)
+    sorted_updates = sorted(updates.items(), key=lambda item: item[0])
+
+    if _is_excel_path(csv_path):
+        logger.info(
+            "Loading XLSX workbook for batch update (%d rows): %s",
+            len(sorted_updates),
+            csv_path,
+        )
+        _update_excel_rows(csv_path, sorted_updates)
+        logger.info("Finished XLSX batch update: %s", csv_path)
+        return
+
+    rows = _read_all_rows(csv_path)
+    for row_index, image_filename in sorted_updates:
+        if row_index >= len(rows):
+            raise IndexError(f"Row index {row_index} out of range ({len(rows)} rows)")
+        rows[row_index][IMAGE_COLUMN] = image_filename
+
+    _write_all_rows(csv_path, rows)
 
 
 def ensure_image_column(csv_path: str | Path) -> None:
@@ -138,6 +193,15 @@ def ensure_image_column(csv_path: str | Path) -> None:
     program start before the main loop.
     """
     csv_path = Path(csv_path)
+
+    if _is_excel_path(csv_path):
+        headers = _read_excel_headers(csv_path)
+        if EXCEL_IMAGE_COLUMN not in headers:
+            raise ValueError(
+                f"Excel file {csv_path} must contain an existing '{EXCEL_IMAGE_COLUMN}' column."
+            )
+        return
+
     rows = _read_all_rows(csv_path)
     if rows and IMAGE_COLUMN not in rows[0]:
         for row in rows:
@@ -152,10 +216,72 @@ def ensure_image_column(csv_path: str | Path) -> None:
 
 
 def _read_all_rows(csv_path: Path) -> list[dict[str, Any]]:
+    if _is_excel_path(csv_path):
+        return _read_all_rows_excel(csv_path)
+
     delimiter = _detect_delimiter(csv_path)
     with csv_path.open("r", newline="", encoding="utf-8-sig") as fh:
         reader = csv.DictReader(fh, delimiter=delimiter, quotechar='"', escapechar='\\')
         return [dict(row) for row in reader]
+
+
+def _read_all_rows_excel(path: Path) -> list[dict[str, Any]]:
+    wb = load_workbook(path, data_only=True, read_only=True)
+    try:
+        ws = wb.active
+        rows_iter = list(ws.iter_rows(values_only=True))
+        if not rows_iter:
+            return []
+
+        headers = [_normalize_header(cell) for cell in rows_iter[0]]
+        data_rows: list[dict[str, Any]] = []
+        for row_values in rows_iter[1:]:
+            row_dict = {
+                header: _normalize_cell_value(value)
+                for header, value in zip(headers, row_values)
+                if header
+            }
+            if row_dict:
+                data_rows.append(row_dict)
+
+        return data_rows
+    finally:
+        wb.close()
+
+
+def _iter_pending_rows_excel(
+    path: Path,
+    output_dir: Path,
+    image_column: str,
+    scan_log_every: int,
+) -> Iterator[tuple[int, dict[str, Any]]]:
+    """Stream XLSX rows to avoid full in-memory loading before processing."""
+    wb = load_workbook(path, data_only=True, read_only=True)
+    try:
+        ws = wb.active
+        rows_iter = ws.iter_rows(values_only=True)
+
+        header_values = next(rows_iter, None)
+        if header_values is None:
+            return
+
+        headers = [_normalize_header(cell) for cell in header_values]
+
+        for idx, row_values in enumerate(rows_iter):
+            if scan_log_every > 0 and (idx + 1) % scan_log_every == 0:
+                logger.info("Scanning spreadsheet rows... %d checked", idx + 1)
+
+            row = {
+                header: _normalize_cell_value(value)
+                for header, value in zip(headers, row_values)
+                if header
+            }
+            image_file = (row.get(image_column, "") or "").strip()
+            if image_file and (output_dir / image_file).exists():
+                continue
+            yield idx, row
+    finally:
+        wb.close()
 
 
 def _write_all_rows(csv_path: Path, rows: list[dict[str, Any]]) -> None:
@@ -191,6 +317,96 @@ def _write_all_rows(csv_path: Path, rows: list[dict[str, Any]]) -> None:
         except OSError:
             pass
         raise
+
+
+def _update_excel_row(path: Path, row_index: int, image_filename: str) -> None:
+    _update_excel_rows(path, [(row_index, image_filename)])
+
+
+def _update_excel_rows(path: Path, updates: list[tuple[int, str]]) -> None:
+    wb = load_workbook(path)
+    try:
+        ws = wb.active
+        headers = [_normalize_header(cell.value) for cell in ws[1]]
+        try:
+            image_col_idx = headers.index(EXCEL_IMAGE_COLUMN) + 1
+        except ValueError as exc:
+            raise ValueError(
+                f"Excel file {path} must contain an existing '{EXCEL_IMAGE_COLUMN}' column."
+            ) from exc
+
+        for row_index, image_filename in updates:
+            sheet_row = row_index + 2
+            if sheet_row > ws.max_row:
+                raise IndexError(f"Row index {row_index} out of range ({max(0, ws.max_row - 1)} rows)")
+
+            ws.cell(row=sheet_row, column=image_col_idx, value=image_filename)
+
+        fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=".tmp_", suffix=path.suffix)
+        os.close(fd)
+        os.unlink(tmp_path)
+        wb.save(tmp_path)
+        _replace_with_retries(Path(tmp_path), path)
+    finally:
+        wb.close()
+
+
+def _replace_with_retries(tmp_path: Path, target_path: Path, retries: int = 3, delay: float = 0.5) -> None:
+    """Replace a file with small retries to tolerate brief Windows file locks."""
+    last_error: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            os.replace(tmp_path, target_path)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            if attempt < retries:
+                logger.warning(
+                    "Spreadsheet file is locked, retrying replace (%d/%d): %s",
+                    attempt,
+                    retries,
+                    target_path,
+                )
+                time.sleep(delay)
+            else:
+                break
+
+    try:
+        tmp_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+    raise PermissionError(
+        f"Could not update spreadsheet {target_path}. It may be open in Excel or locked by another process."
+    ) from last_error
+
+
+def _read_excel_headers(path: Path) -> list[str]:
+    logger.info("Loading XLSX headers: %s", path)
+    wb = load_workbook(path, data_only=True)
+    try:
+        ws = wb.active
+        headers = [_normalize_header(cell.value) for cell in ws[1] if _normalize_header(cell.value)]
+        logger.info("Loaded %d XLSX headers from %s", len(headers), path)
+        return headers
+    finally:
+        wb.close()
+
+
+def _normalize_header(value: Any) -> str:
+    return "" if value is None else str(value).strip()
+
+
+def _normalize_cell_value(value: Any) -> str:
+    return "" if value is None else str(value).strip()
+
+
+def _is_excel_path(path: Path) -> bool:
+    return path.suffix.lower() in {".xlsx", ".xlsm", ".xltx", ".xltm"}
+
+
+def _get_image_column(path: Path) -> str:
+    return EXCEL_IMAGE_COLUMN if _is_excel_path(path) else IMAGE_COLUMN
 
 
 def _detect_delimiter(csv_path: Path) -> str:

@@ -5,9 +5,11 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
+from openpyxl import Workbook, load_workbook
 import pytest
 
 from cover_fetcher.csv_handler import (
+    EXCEL_IMAGE_COLUMN,
     IMAGE_COLUMN,
     build_image_filename,
     ensure_image_column,
@@ -15,6 +17,7 @@ from cover_fetcher.csv_handler import (
     reserve_unique_filename,
     sanitize_filename,
     update_row,
+    update_rows,
 )
 
 
@@ -86,6 +89,16 @@ def _write_simple_csv(path: Path, rows: list[dict]) -> None:
         writer.writerows(rows)
 
 
+def _write_simple_xlsx(path: Path, headers: list[str], rows: list[list[str]]) -> None:
+    wb = Workbook()
+    ws = wb.active
+    ws.append(headers)
+    for row in rows:
+        ws.append(row)
+    wb.save(path)
+    wb.close()
+
+
 def test_ensure_image_column_adds_column(tmp_path):
     csv_path = tmp_path / "collection.csv"
     _write_simple_csv(csv_path, [{"artist": "X", "title": "Y"}])
@@ -104,6 +117,21 @@ def test_ensure_image_column_idempotent(tmp_path):
         reader = csv.DictReader(fh)
         cols = reader.fieldnames or []
     assert cols.count(IMAGE_COLUMN) == 1
+
+
+def test_ensure_image_column_requires_existing_image_column_in_xlsx(tmp_path):
+    xlsx_path = tmp_path / "collection.xlsx"
+    _write_simple_xlsx(xlsx_path, ["Band", "Title"], [["A", "Song"]])
+
+    with pytest.raises(ValueError, match="must contain an existing 'Image' column"):
+        ensure_image_column(xlsx_path)
+
+
+def test_ensure_image_column_accepts_existing_image_column_in_xlsx(tmp_path):
+    xlsx_path = tmp_path / "collection.xlsx"
+    _write_simple_xlsx(xlsx_path, ["Band", "Title", EXCEL_IMAGE_COLUMN], [["A", "Song", ""]])
+
+    ensure_image_column(xlsx_path)
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +195,21 @@ def test_iter_pending_rows_parses_semicolon_delimited_csv(tmp_path):
     assert row["Label"] == "Extreme"
 
 
+def test_iter_pending_rows_xlsx_uses_image_column(tmp_path):
+    xlsx_path = tmp_path / "collection.xlsx"
+    (tmp_path / "done.jpg").write_bytes(b"ok")
+    _write_simple_xlsx(
+        xlsx_path,
+        ["Band", "Title", EXCEL_IMAGE_COLUMN],
+        [["A", "Done", "done.jpg"], ["B", "Pending", ""]],
+    )
+
+    pending = list(iter_pending_rows(xlsx_path, tmp_path))
+    assert len(pending) == 1
+    assert pending[0][0] == 1
+    assert pending[0][1]["Band"] == "B"
+
+
 # ---------------------------------------------------------------------------
 # update_row
 # ---------------------------------------------------------------------------
@@ -191,3 +234,59 @@ def test_update_row_out_of_range(tmp_path):
     _write_simple_csv(csv_path, [{"artist": "A", "title": "T", IMAGE_COLUMN: ""}])
     with pytest.raises(IndexError):
         update_row(csv_path, 99, "x.jpg")
+
+
+def test_update_row_sets_value_in_xlsx_image_column(tmp_path):
+    xlsx_path = tmp_path / "collection.xlsx"
+    _write_simple_xlsx(
+        xlsx_path,
+        ["Band", "Title", EXCEL_IMAGE_COLUMN],
+        [["A", "T", ""], ["B", "U", ""]],
+    )
+
+    update_row(xlsx_path, 0, "a_t_lp.jpg")
+
+    wb = load_workbook(xlsx_path, data_only=True)
+    try:
+        ws = wb.active
+        assert ws.cell(row=2, column=3).value == "a_t_lp.jpg"
+        assert ws.cell(row=3, column=3).value in (None, "")
+    finally:
+        wb.close()
+
+
+def test_update_rows_sets_multiple_values_in_csv(tmp_path):
+    csv_path = tmp_path / "collection.csv"
+    _write_simple_csv(csv_path, [
+        {"artist": "A", "title": "T", IMAGE_COLUMN: ""},
+        {"artist": "B", "title": "U", IMAGE_COLUMN: ""},
+        {"artist": "C", "title": "V", IMAGE_COLUMN: ""},
+    ])
+
+    update_rows(csv_path, {0: "a.jpg", 2: "c.jpg"})
+
+    with csv_path.open() as fh:
+        rows = list(csv.DictReader(fh))
+    assert rows[0][IMAGE_COLUMN] == "a.jpg"
+    assert rows[1][IMAGE_COLUMN] == ""
+    assert rows[2][IMAGE_COLUMN] == "c.jpg"
+
+
+def test_update_rows_sets_multiple_values_in_xlsx(tmp_path):
+    xlsx_path = tmp_path / "collection.xlsx"
+    _write_simple_xlsx(
+        xlsx_path,
+        ["Band", "Title", EXCEL_IMAGE_COLUMN],
+        [["A", "T", ""], ["B", "U", ""], ["C", "V", ""]],
+    )
+
+    update_rows(xlsx_path, {0: "a.jpg", 2: "c.jpg"})
+
+    wb = load_workbook(xlsx_path, data_only=True)
+    try:
+        ws = wb.active
+        assert ws.cell(row=2, column=3).value == "a.jpg"
+        assert ws.cell(row=3, column=3).value in (None, "")
+        assert ws.cell(row=4, column=3).value == "c.jpg"
+    finally:
+        wb.close()

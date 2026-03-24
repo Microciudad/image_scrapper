@@ -110,3 +110,16 @@ def test_apply_pipeline_auto_saturation():
     steps = [{"step": "auto_saturation", "clip_percent": 1.0}]
     result = apply_pipeline(raw, steps)
     assert result[:2] == b"\xff\xd8"
+
+
+def test_apply_pipeline_jpeg_quality_controls_output_size():
+    raw = _make_jpeg_bytes(width=200, height=200)
+    high = apply_pipeline(raw, [{"step": "jpeg", "quality": 95}])
+    low = apply_pipeline(raw, [{"step": "jpeg", "quality": 40}])
+    assert len(low) <= len(high)
+
+
+def test_apply_pipeline_jpeg_quality_is_clamped():
+    raw = _make_jpeg_bytes(width=100, height=100)
+    result = apply_pipeline(raw, [{"step": "jpeg", "quality": 500}])
+    assert result[:2] == b"\xff\xd8"
