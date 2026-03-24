@@ -5,6 +5,7 @@ Supported pipeline steps
 - ``rotate``        – rotate the image by a fixed number of degrees (clockwise).
 - ``auto_brightness`` – stretch the image brightness histogram (linear stretch).
 - ``auto_saturation`` – stretch the saturation channel histogram (linear stretch).
+- ``desaturate``    – reduce color intensity by a configurable amount.
 - ``crush_blacks``  – clip shadows below a black-point threshold to pure black.
 - ``zoom``          – crop-and-rescale for zoom in/out around a focal point.
 - ``resize``        – upscale (or downscale) to a target size using LANCZOS.
@@ -20,6 +21,8 @@ Each step is represented as a mapping in the ``pipeline`` list of the YAML::
         clip_percent: 2.0
       - step: auto_saturation
         clip_percent: 2.0
+            - step: desaturate
+                amount: 0.2
 """
 
 from __future__ import annotations
@@ -101,6 +104,8 @@ def apply_pipeline(image_bytes: bytes, steps: list[dict[str, Any]]) -> bytes:
             img = _auto_brightness(img, cfg)
         elif step == "auto_saturation":
             img = _auto_saturation(img, cfg)
+        elif step == "desaturate":
+            img = _desaturate(img, cfg)
         elif step == "crush_blacks":
             img = _crush_blacks(img, cfg)
         elif step == "denoise":
@@ -294,6 +299,20 @@ def _auto_saturation(img: PILImage, cfg: dict[str, Any]) -> PILImage:
         out[:, :, 2][mask] = cb[mask]
 
     return Image.fromarray((out * 255.0).clip(0, 255).astype(np.uint8))
+
+
+def _desaturate(img: PILImage, cfg: dict[str, Any]) -> PILImage:
+    """Reduce image saturation.
+
+    ``amount`` controls the desaturation intensity in ``[0, 1]``:
+    - ``0.0``: unchanged image
+    - ``1.0``: fully desaturated (grayscale)
+    """
+    amount = max(0.0, min(1.0, float(cfg.get("amount", 0.25))))
+    if amount <= 0.0:
+        return img
+    factor = 1.0 - amount
+    return ImageEnhance.Color(img).enhance(factor)
 
 
 def _distress(img: PILImage, cfg: dict[str, Any]) -> PILImage:

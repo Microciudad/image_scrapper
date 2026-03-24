@@ -5,10 +5,10 @@ from __future__ import annotations
 # Country code to country name equivalences for query enrichment
 COUNTRY_EQUIVALENCES = {
     "SP": "Spain",
-    "UK": "England",
+    "UK": "UK",
     "DE": "Germany",
     "IT": "Italy",
-    "US": "Usa",
+    "US": "USA",
     "FR": "France",
     "CA": "Canada",
     "JP": "Japan",
