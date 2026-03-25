@@ -1,6 +1,5 @@
 """Google Images scraper that extracts base64-encoded thumbnails.
 
-This module reuses the proven scraping approach from the musee project:
 - Randomised User-Agent rotation via fake-useragent
 - Browser-like request headers to avoid blocks
 - Base64 thumbnail extraction from Google Images HTML
@@ -57,7 +56,7 @@ _SET_IMAGE_SRC_PATTERN = re.compile(
     r"var\s+ii=\[[^\]]+\];\s*_setImagesSrc\(ii,s\);",
     re.IGNORECASE,
 )
-_OU_URL_PATTERN = re.compile(r'"ou":"(https?:\\/\\/[^"\\]+)"')
+_OU_URL_PATTERN = re.compile(r'"ou":"(https?:(?:\\/|[^"\\])+)"')
 _IMG_URL_PATTERN = re.compile(r'"(https?://[^"\\]+(?:jpg|jpeg|png|webp)(?:\?[^"\\]*)?)"', re.IGNORECASE)
 _DIRECT_IMG_URL_PATTERN = re.compile(r'https?://[^\s<>"]+\.(?:jpg|jpeg|jpe|png|webp|gif)[^\s<>"]*', re.IGNORECASE)
 _GSTATIC_URL_PATTERN = re.compile(r'https://encrypted-tbn0\.gstatic\.com/images\?[^\s"\'<>]*', re.IGNORECASE)

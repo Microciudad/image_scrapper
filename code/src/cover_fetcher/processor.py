@@ -10,6 +10,7 @@ Supported pipeline steps
 - ``zoom``          – crop-and-rescale for zoom in/out around a focal point.
 - ``resize``        – upscale (or downscale) to a target size using LANCZOS.
 - ``watermark``     – overlay a semi-transparent watermark image.
+- ``color_eq``      – multiply each RGB channel by an independent gain factor.
 - ``jpeg``          – control final JPEG encoding quality/compression settings.
 
 Each step is represented as a mapping in the ``pipeline`` list of the YAML::
@@ -108,6 +109,8 @@ def apply_pipeline(image_bytes: bytes, steps: list[dict[str, Any]]) -> bytes:
             img = _desaturate(img, cfg)
         elif step == "crush_blacks":
             img = _crush_blacks(img, cfg)
+        elif step == "color_eq":
+            img = _color_eq(img, cfg)
         elif step == "denoise":
             img = _denoise(img, cfg)
         elif step == "distress":
@@ -455,6 +458,41 @@ def _crush_blacks(img: PILImage, cfg: dict[str, Any]) -> PILImage:
     luma = (0.2126 * arr[:, :, 0] + 0.7152 * arr[:, :, 1] + 0.0722 * arr[:, :, 2]) / 255.0
     shadow_mask = luma < black_point
     arr[shadow_mask] = 0.0
+
+    return Image.fromarray(arr.clip(0, 255).astype(np.uint8))
+
+
+def _color_eq(img: PILImage, cfg: dict[str, Any]) -> PILImage:
+    """Adjust individual RGB channel gains (color equalizer).
+
+    Each channel is multiplied by its factor and clamped to [0, 255].
+    Values above 1.0 boost the channel; values below 1.0 reduce it.
+
+    Args:
+        red:   Red channel multiplier. Default: 1.0 (no change).
+        green: Green channel multiplier. Default: 1.0 (no change).
+        blue:  Blue channel multiplier. Default: 1.0 (no change).
+
+    Example YAML::
+
+        - step: color_eq
+          red: 1.1
+          green: 0.95
+          blue: 0.9
+    """
+    import numpy as np
+
+    r_gain = float(cfg.get("red",   1.0))
+    g_gain = float(cfg.get("green", 1.0))
+    b_gain = float(cfg.get("blue",  1.0))
+
+    if r_gain == 1.0 and g_gain == 1.0 and b_gain == 1.0:
+        return img
+
+    arr = np.array(img, dtype=np.float32)
+    arr[:, :, 0] *= r_gain
+    arr[:, :, 1] *= g_gain
+    arr[:, :, 2] *= b_gain
 
     return Image.fromarray(arr.clip(0, 255).astype(np.uint8))
 

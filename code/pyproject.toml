@@ -10,7 +10,6 @@ dependencies = [
     "Pillow>=11.1.0",
     "pyyaml>=6.0.2",
     "rich>=13.9.4",
-    "fake-useragent>=2.0.3",
     "numpy>=1.26.0",
     "playwright>=1.40.0",
     "openpyxl>=3.1.5",
@@ -32,6 +31,7 @@ packages = ["src/cover_fetcher"]
 dev = [
     "pytest>=8.3.0",
     "pytest-mock>=3.14.0",
+    "fake-useragent>=2.0.3",
 ]
 
 [tool.pytest.ini_options]

@@ -122,6 +122,21 @@ def run(
         "--country-col",
         help="CSV/XLSX column name for edition country/region code (for example ED).",
     ),
+    pipeline_col: Optional[str] = typer.Option(
+        None,
+        "--pipeline-col",
+        help=(
+            "Column name in the spreadsheet to read per-row pipeline names from. "
+            "When set, enables per-row pipeline mode: each row uses "
+            "<pipelines-dir>/<value>.yaml, or <pipelines-dir>/default.yaml if the cell is blank. "
+            "If not set, the single --pipeline (or built-in default) is used for all rows."
+        ),
+    ),
+    pipelines_dir: Path = typer.Option(
+        Path("pipelines"),
+        "--pipelines-dir",
+        help="Directory containing per-row pipeline YAML files used with --pipeline-col (default: ./pipelines).",
+    ),
     max_retries: int = typer.Option(3, "--max-retries", help="Number of Google fetch retries per row."),
     retry_delay: float = typer.Option(2.0, "--retry-delay", help="Base delay (seconds) between retries."),
     workers: int = typer.Option(
@@ -272,6 +287,35 @@ def run(
     # -- Load image pipeline ------------------------------------------------
     pipeline_steps = _resolve_pipeline(pipeline_config)
 
+    # -- Per-row pipeline mode ---------------------------------------------
+    if pipeline_col:
+        console.print(
+            f"[bold cyan]Per-row pipeline mode enabled:[/] reading pipeline names from column "
+            f"[bold]{pipeline_col}[/], pipelines directory: [bold]{pipelines_dir}[/]"
+        )
+        pipeline_cache: dict[str, list] = {}
+        pipeline_cache_lock = threading.Lock()
+
+        def _resolve_row_pipeline(name: str) -> list:
+            """Return pipeline steps for *name* (cached). Falls back to default pipeline on error."""
+            key = name.strip().lower() if name.strip() else ""
+            with pipeline_cache_lock:
+                if key in pipeline_cache:
+                    return pipeline_cache[key]
+            yaml_path = (pipelines_dir / f"{name.strip()}.yaml") if key else (pipelines_dir / "default.yaml")
+            try:
+                steps = processor.load_pipeline(yaml_path)
+                log.debug("Loaded per-row pipeline %r from %s", name or "(default)", yaml_path)
+            except (FileNotFoundError, ValueError) as exc:
+                log.warning(
+                    "Per-row pipeline not found for %r (%s) – falling back to global pipeline. Error: %s",
+                    name, yaml_path, exc,
+                )
+                steps = pipeline_steps
+            with pipeline_cache_lock:
+                pipeline_cache[key] = steps
+            return steps
+
     # -- Prepare collection file --------------------------------------------
     try:
         csv_handler.ensure_image_column(csv_path)
@@ -333,6 +377,7 @@ def run(
 
             artist, title, year, format_, label = _extract_query_fields(row)
             edition_country = _translate_country(_extract_country_value(row, country_col), country_map)
+            row_pipeline_name = _row_get(row, pipeline_col).strip() if pipeline_col else ""
             expected_filename = csv_handler.build_image_filename(artist, title, format_)
             existing_image_value = _get_row_image_value(row)
             persisted_image_value = persisted_pending_updates.get(row_index, "")
@@ -386,6 +431,7 @@ def run(
                     "dest": dest,
                     "final_google_html_path": final_google_html_path,
                     "final_google_html_format": final_google_html_format,
+                    "row_pipeline_name": row_pipeline_name,
                 }
             )
 
@@ -461,8 +507,12 @@ def run(
                 temp_html_path.unlink(missing_ok=True)
             return {"status": "not_found", **job}
 
+        if pipeline_col:
+            job_pipeline_steps = _resolve_row_pipeline(job.get("row_pipeline_name", ""))
+        else:
+            job_pipeline_steps = pipeline_steps
         try:
-            processed_bytes = processor.apply_pipeline(image_bytes, pipeline_steps)
+            processed_bytes = processor.apply_pipeline(image_bytes, job_pipeline_steps)
         except (ValueError, OSError, RuntimeError) as exc:
             log.warning("Pipeline failed for %r – saving raw image. Error: %s", job["title"], exc)
             processed_bytes = image_bytes

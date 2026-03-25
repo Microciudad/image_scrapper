@@ -10,7 +10,6 @@ from cover_fetcher.scraper import (
     _build_headers,
     build_query,
 )
-from fake_useragent import UserAgent
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +113,6 @@ def test_extract_thumbnail_from_set_images_src_payload():
 
 
 def test_build_headers_has_user_agent():
-    ua = UserAgent()
-    headers = _build_headers(ua)
+    headers = _build_headers()
     assert "User-Agent" in headers
     assert len(headers["User-Agent"]) > 10

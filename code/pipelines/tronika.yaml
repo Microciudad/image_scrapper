@@ -1,0 +1,50 @@
+pipeline:
+
+  # ↓ move this 'stop' line down to preview output at any stage
+  # - step: stop
+
+  # Optional crop-and-rescale zoom before other effects:
+  # - step: zoom
+  #   factor: {random: [0.95, 1.12]}
+  #   center_x: 0.5
+  #   center_y: 0.5
+
+  # Clean JPEG artifacts/noise on the source BEFORE upscaling.
+
+   
+
+  - step: auto_brightness
+    clip_percent: 0.2
+
+  - step: auto_saturation
+    clip_percent: 0.2
+
+  - step: color_eq
+    red: 1.1      # boost red by 10 %
+    green: 0.95   # reduce green slightly
+    blue: 0.9     # reduce blue slightly
+
+  - step: crush_blacks
+    black_point: 0.18
+
+  
+  - step: distress
+    dust_spots: {random: [25, 40]}    
+    dust_opacity: 0.50
+    
+
+  #- step: stop
+
+  - step: resize
+    width: 360
+    height: 360
+    keep_aspect: true
+    unsharp_radius: 1.5
+    unsharp_percent: 120
+    unsharp_threshold: 3
+
+
+  - step: jpeg
+    quality: 65       # 1..100 (lower = more compression, smaller files)
+    optimize: true    # smaller output, slightly slower
+    progressive: true # progressive JPEG

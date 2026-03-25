@@ -135,7 +135,6 @@ name = "cover-fetcher"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "fake-useragent" },
     { name = "numpy" },
     { name = "openpyxl" },
     { name = "pillow" },
@@ -148,13 +147,13 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "fake-useragent" },
     { name = "pytest" },
     { name = "pytest-mock" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "fake-useragent", specifier = ">=2.0.3" },
     { name = "numpy", specifier = ">=1.26.0" },
     { name = "openpyxl", specifier = ">=3.1.5" },
     { name = "pillow", specifier = ">=11.1.0" },
@@ -167,6 +166,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "fake-useragent", specifier = ">=2.0.3" },
     { name = "pytest", specifier = ">=8.3.0" },
     { name = "pytest-mock", specifier = ">=3.14.0" },
 ]

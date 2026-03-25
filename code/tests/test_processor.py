@@ -135,6 +135,28 @@ def test_apply_pipeline_auto_saturation():
     assert result[:2] == b"\xff\xd8"
 
 
+def test_apply_pipeline_desaturate_full_makes_gray():
+    img = Image.new("RGB", (16, 16), color=(220, 40, 40))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG")
+
+    result = apply_pipeline(buf.getvalue(), [{"step": "desaturate", "amount": 1.0}])
+    out = Image.open(io.BytesIO(result)).convert("RGB")
+    r, g, b = out.getpixel((8, 8))
+    assert abs(r - g) <= 2 and abs(g - b) <= 2
+
+
+def test_apply_pipeline_desaturate_zero_keeps_color_relationship():
+    img = Image.new("RGB", (16, 16), color=(220, 40, 40))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG")
+
+    result = apply_pipeline(buf.getvalue(), [{"step": "desaturate", "amount": 0.0}])
+    out = Image.open(io.BytesIO(result)).convert("RGB")
+    r, g, b = out.getpixel((8, 8))
+    assert r > g and r > b
+
+
 def test_apply_pipeline_jpeg_quality_controls_output_size():
     raw = _make_jpeg_bytes(width=200, height=200)
     high = apply_pipeline(raw, [{"step": "jpeg", "quality": 95}])

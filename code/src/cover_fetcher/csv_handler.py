@@ -128,6 +128,11 @@ def iter_pending_rows(
         if scan_log_every > 0 and (idx + 1) % scan_log_every == 0:
             logger.info("Scanning rows... %d checked", idx + 1)
 
+        # Stop at the first fully-blank data row (end-of-data sentinel)
+        if _is_blank_row(row, image_column):
+            logger.info("Blank row encountered at index %d – stopping scan.", idx)
+            break
+
         image_file = (row.get(image_column, "") or "").strip()
         if image_file and (output_dir / image_file).exists():
             logger.debug("Row %d already done (%s) – skipping", idx, image_file)
@@ -277,6 +282,12 @@ def _iter_pending_rows_excel(
                 for header, value in zip(headers, row_values)
                 if header
             }
+
+            # Stop at the first fully-blank data row (end-of-data sentinel)
+            if _is_blank_row(row, image_column):
+                logger.info("Blank row encountered at index %d – stopping scan.", idx)
+                break
+
             image_file = (row.get(image_column, "") or "").strip()
             if image_file and (output_dir / image_file).exists():
                 continue
@@ -430,6 +441,20 @@ def _normalize_header(value: Any) -> str:
 
 def _normalize_cell_value(value: Any) -> str:
     return "" if value is None else str(value).strip()
+
+
+def _is_blank_row(row: dict[str, Any], image_column: str) -> bool:
+    """Return True if *row* contains no meaningful data (end-of-spreadsheet sentinel).
+
+    A row is considered blank when every column value is empty, ignoring the
+    image-filename column which may be legitimately empty before processing.
+    """
+    for key, value in row.items():
+        if key == image_column:
+            continue
+        if (value or "").strip():
+            return False
+    return True
 
 
 def _is_excel_path(path: Path) -> bool:

@@ -1,0 +1,63 @@
+pipeline:
+
+  # ↓ move this 'stop' line down to preview output at any stage
+  # - step: stop
+
+  # Optional crop-and-rescale zoom before other effects:
+  # - step: zoom
+  #   factor: {random: [0.95, 1.12]}
+  #   center_x: 0.5
+  #   center_y: 0.5
+
+  # Clean JPEG artifacts/noise on the source BEFORE upscaling.
+
+ 
+
+  - step: denoise
+    mode: gaussian   # 'gaussian' for JPEG blocks/ringing; 'median' for grain
+    radius: 1.5      # increase to 1.2-1.5 for heavily compressed sources
+    strength: 0.85   # 0.0 = original, 1.0 = full filter
+
+  - step: rotate
+    degrees: {random: [1, 1]}  # random tilt per image; use a fixed number to disable    
+    expand: false
+    fill: border
+
+  - step: auto_brightness
+    clip_percent: 0.2
+
+  - step: auto_saturation
+    clip_percent: 0.3
+
+  - step: crush_blacks
+    black_point: 0.18
+
+  - step: zoom
+    factor: {random: [1.0, 1.12]}
+    center_x: {random: [0.45, 0.55]}
+    center_y: {random: [0.45, 0.55]}
+
+  - step: distress
+    scratches: {random: [0, 3]}     # ← different count every image
+    scratch_opacity: 0.25
+    dust_spots: {random: [15, 40]}    
+    dust_opacity: 0.45
+    scratch_width: 1.5
+
+  #- step: stop
+
+  - step: resize
+    width: 380
+    height: 380
+    keep_aspect: true
+    unsharp_radius: 1.5
+    unsharp_percent: 120
+    unsharp_threshold: 3
+
+  - step: desaturate
+    amount: {random: [0.08, 0.22]}
+
+  - step: jpeg
+    quality: 60       # 1..100 (lower = more compression, smaller files)
+    optimize: true    # smaller output, slightly slower
+    progressive: true # progressive JPEG

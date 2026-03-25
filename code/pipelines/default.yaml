@@ -37,6 +37,11 @@
 #     clip_percent (float) – same as above, applied to the saturation channel.
 #                            Default: 1.0.
 #
+#   desaturate
+#     amount (float) – desaturation intensity in [0,1].
+#                      0.0 = no change, 1.0 = grayscale.
+#                      Typical range: 0.05-0.35.
+#
 #   crush_blacks
 #     black_point (float) – normalized shadow threshold in [0,1]. Pixels darker
 #                           than this become pure black. Start around 0.14-0.22.
@@ -200,10 +205,13 @@ pipeline:
     fill: border
 
   - step: auto_brightness
-    clip_percent: 0.2
+    clip_percent: 0.5
 
   - step: auto_saturation
     clip_percent: 0.2
+
+  - step: desaturate
+    amount: {random: [0.08, 0.22]}
 
   - step: crush_blacks
     black_point: 0.18
@@ -244,6 +252,10 @@ pipeline:
     unsharp_radius: 1.5
     unsharp_percent: 120
     unsharp_threshold: 3
+
+  - step: desaturate
+    amount: {random: [0.08, 0.22]}
+
 
   - step: jpeg
     quality: 60       # 1..100 (lower = more compression, smaller files)
