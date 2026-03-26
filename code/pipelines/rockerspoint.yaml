@@ -61,6 +61,6 @@ pipeline:
     amount: {random: [0.08, 0.22]}
 
   - step: jpeg
-    quality: 60       # 1..100 (lower = more compression, smaller files)
+    quality: 65       # 1..100 (lower = more compression, smaller files)
     optimize: true    # smaller output, slightly slower
     progressive: true # progressive JPEG

@@ -45,6 +45,6 @@ pipeline:
 
 
   - step: jpeg
-    quality: 65       # 1..100 (lower = more compression, smaller files)
+    quality: 70       # 1..100 (lower = more compression, smaller files)
     optimize: true    # smaller output, slightly slower
     progressive: true # progressive JPEG

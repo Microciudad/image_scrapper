@@ -50,8 +50,8 @@ pipeline:
   #- step: stop
 
   - step: resize
-    width: 380
-    height: 380
+    width: 390
+    height: 390
     keep_aspect: true
     unsharp_radius: 1.5
     unsharp_percent: 120

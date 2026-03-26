@@ -376,6 +376,11 @@ def run(
                 console.print(f"[dim]Preparing jobs from pending rows:[/] {scanned_pending_rows} checked")
 
             artist, title, year, format_, label = _extract_query_fields(row)
+            if not artist.strip() and not title.strip():
+                console.print(
+                    f"[bold yellow]End of data detected:[/] row {row_index} has blank artist and title. Stopping further scan."
+                )
+                break
             edition_country = _translate_country(_extract_country_value(row, country_col), country_map)
             row_pipeline_name = _row_get(row, pipeline_col).strip() if pipeline_col else ""
             expected_filename = csv_handler.build_image_filename(artist, title, format_)
