@@ -27,11 +27,11 @@ pipeline:
     clip_percent: 0.1
 
   - step: auto_saturation
-    clip_percent: 0.3
+    clip_percent: 0.2
 
 
   - step: crush_blacks
-    black_point: 0.18
+    black_point: 0.12
 
   - step: zoom
     factor: {random: [1.0, 1.05]}
@@ -42,8 +42,8 @@ pipeline:
   #- step: stop
 
   - step: resize
-    width: 380
-    height: 380
+    width: 450
+    height: auto 
     keep_aspect: true
     unsharp_radius: 1.5
     unsharp_percent: 120
@@ -51,6 +51,6 @@ pipeline:
 
 
   - step: jpeg
-    quality: 70       # 1..100 (lower = more compression, smaller files)
+    quality: 40       # 1..100 (lower = more compression, smaller files)
     optimize: true    # smaller output, slightly slower
     progressive: true # progressive JPEG

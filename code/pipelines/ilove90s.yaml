@@ -48,8 +48,8 @@ pipeline:
   #- step: stop
 
   - step: resize
-    width: 380
-    height: 380
+    width: 425
+    height: auto 
     keep_aspect: true
     unsharp_radius: 1.5
     unsharp_percent: 120
@@ -59,6 +59,6 @@ pipeline:
     amount: {random: [0.08, 0.22]}
 
   - step: jpeg
-    quality: 60       # 1..100 (lower = more compression, smaller files)
+    quality: 35       # 1..100 (lower = more compression, smaller files)
     optimize: true    # smaller output, slightly slower
     progressive: true # progressive JPEG

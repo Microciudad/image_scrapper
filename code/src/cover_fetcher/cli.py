@@ -56,6 +56,16 @@ _DEFAULT_OUTPUT_DIR = Path("downloads")
 _DEFAULT_PIPELINE = Path("pipeline.yaml")
 _RESULT_UPDATE_BATCH_SIZE = 25
 _PENDING_UPDATES_SUFFIX = ".pending_updates.json"
+_IMAGE_FILE_EXTENSIONS = {
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".webp",
+    ".bmp",
+    ".gif",
+    ".tif",
+    ".tiff",
+}
 
 # ---------------------------------------------------------------------------
 # Commands
@@ -102,6 +112,34 @@ def run(
         _DEFAULT_OUTPUT_DIR,
         "--output-dir",
         help="Directory where downloaded (and processed) images are saved.",
+    ),
+    max_filename_length: int = typer.Option(
+        100,
+        "--max-filename-length",
+        min=20,
+        help="Maximum generated image filename length (including extension).",
+    ),
+    images_dir: Optional[Path] = typer.Option(
+        None,
+        "--images-dir",
+        help="Alias for --output-dir (especially useful with --cleanup-orphan-images).",
+    ),
+    cleanup_orphan_images: bool = typer.Option(
+        False,
+        "--cleanup-orphan-images/--no-cleanup-orphan-images",
+        help="Delete image files in the target images directory that are no longer referenced in the spreadsheet.",
+    ),
+    do_not_fetch_and_use: Optional[Path] = typer.Option(
+        None,
+        "--do-not-fetch-and-use",
+        help=(
+            "Skip Google fetching entirely. Use the specified image file as the source for every pending row: "
+            "run the pipeline on it and update the spreadsheet with the resulting filename."
+        ),
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
     ),
     pipeline_config: Optional[Path] = typer.Option(
         None,
@@ -259,6 +297,37 @@ def run(
         captcha_cooldown_max,
     )
 
+    if images_dir is not None:
+        output_dir = images_dir
+
+    # -- Orphan-image cleanup mode ----------------------------------------
+    if cleanup_orphan_images:
+        if csv_path is None:
+            raise typer.BadParameter("--csv is required with --cleanup-orphan-images.")
+        if not output_dir.exists() or not output_dir.is_dir():
+            raise typer.BadParameter(f"Images directory does not exist or is not a directory: {output_dir}")
+
+        try:
+            referenced_image_names = csv_handler.get_referenced_image_filenames(csv_path)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+
+        scanned_count, kept_count, removed_count, deleted_names = _cleanup_orphan_images(
+            output_dir,
+            referenced_image_names,
+            log,
+        )
+        console.print(f"[bold]Cleanup target directory:[/] {output_dir.resolve()}")
+        console.print(f"[bold]Referenced images in spreadsheet:[/] {len(referenced_image_names)}")
+        console.print(f"[bold]Image files scanned:[/] {scanned_count}")
+        console.print(f"[bold green]Orphan image files removed:[/] {removed_count}")
+        if deleted_names:
+            console.print("[bold]Deleted files:[/]")
+            for name in deleted_names:
+                console.print(f"  - {name}")
+        console.print(f"[bold]Image files kept:[/] {kept_count}")
+        return
+
     # -- Image-only processing mode ----------------------------------------
     image_mode = input_image is not None or output_image is not None
     if image_mode:
@@ -367,6 +436,7 @@ def run(
     jobs: list[dict[str, Any]] = []
     auto_fill_updates: dict[int, str] = {}
     scanned_pending_rows = 0
+    oversized_files_cleaned = 0
     prep_log_every = max(500, scan_log_every) if scan_log_every > 0 else 1000
     pending_rows_iter = csv_handler.iter_pending_rows(csv_path, output_dir, scan_log_every=scan_log_every)
     try:
@@ -386,6 +456,27 @@ def run(
             expected_filename = csv_handler.build_image_filename(artist, title, format_)
             existing_image_value = _get_row_image_value(row)
             persisted_image_value = persisted_pending_updates.get(row_index, "")
+
+            # Clean up oversized filenames that exceed max limit
+            if existing_image_value and len(existing_image_value) > max_filename_length:
+                oversized_path = output_dir / existing_image_value
+                try:
+                    oversized_path.unlink(missing_ok=True)
+                    oversized_files_cleaned += 1
+                    log.info(
+                        "Removed oversized image file (name length %d > %d) at row %d: %s",
+                        len(existing_image_value),
+                        max_filename_length,
+                        row_index,
+                        existing_image_value,
+                    )
+                    console.print(
+                        f"[bold yellow]Cleaned oversized file:[/] row {row_index} – [dim]{existing_image_value}[/]"
+                    )
+                except Exception as exc:
+                    log.warning("Could not delete oversized file %s: %s", oversized_path, exc)
+                existing_image_value = ""
+
             has_meaningful_expected_name = expected_filename != ".jpg" and any(
                 field.strip() for field in (artist, title, format_)
             )
@@ -412,6 +503,7 @@ def run(
                 output_dir,
                 reserved_names,
                 existing_names=existing_output_names,
+                max_filename_length=max_filename_length,
             )
             dest = output_dir / filename
             final_google_html_path: Optional[Path] = None
@@ -458,6 +550,17 @@ def run(
     console.print(f"[bold]Rows to process:[/] {len(jobs)}")
     if auto_fill_updates:
         console.print(f"[bold cyan]Rows auto-filled from existing files:[/] {len(auto_fill_updates)}")
+    if oversized_files_cleaned > 0:
+        console.print(f"[bold yellow]Oversized filenames cleaned:[/] {oversized_files_cleaned}")
+
+    # -- Pre-load forced source image bytes (once, shared across all workers) --
+    forced_image_bytes: Optional[bytes] = None
+    if do_not_fetch_and_use is not None:
+        try:
+            forced_image_bytes = do_not_fetch_and_use.read_bytes()
+        except OSError as exc:
+            raise typer.BadParameter(f"Cannot read source image {do_not_fetch_and_use}: {exc}") from exc
+        console.print(f"[bold cyan]Fetch skipped:[/] using [bold]{do_not_fetch_and_use}[/] as source for all rows")
 
     def _process_job(job: dict[str, Any]) -> dict[str, Any]:
         artist = job['artist'] or '<unknown artist>'
@@ -477,33 +580,36 @@ def run(
             else None
         )
 
-        query = scraper.build_query(
-            job["artist"],
-            job["title"],
-            job["format"],
-            job["label"],
-            job["year"],
-            marketplace,
-            edition_country=job.get("edition_country", ""),
-        )
-        log.debug("Query: %r", query)
+        if forced_image_bytes is not None:
+            image_bytes = forced_image_bytes
+        else:
+            query = scraper.build_query(
+                job["artist"],
+                job["title"],
+                job["format"],
+                job["label"],
+                job["year"],
+                marketplace,
+                edition_country=job.get("edition_country", ""),
+            )
+            log.debug("Query: %r", query)
 
-        image_bytes = scraper.fetch_cover(
-            query,
-            max_retries=max_retries,
-            retry_delay=retry_delay,
-            dump_html_path=dump_google_html,
-            discogs_hq=discogs_hq,
-            browser_fallback=effective_browser_fallback,
-            browser_headless=browser_headless,
-            captcha_wait_seconds=captcha_wait_timeout,
-            reuse_browser_session=effective_reuse_browser_session,
-            captcha_cooldown_base_seconds=resolved_cooldown_base,
-            captcha_cooldown_max_seconds=resolved_cooldown_max,
-            request_label=worker_label,
-            final_html_path=temp_html_path,
-            final_html_format=job["final_google_html_format"],
-        )
+            image_bytes = scraper.fetch_cover(
+                query,
+                max_retries=max_retries,
+                retry_delay=retry_delay,
+                dump_html_path=dump_google_html,
+                discogs_hq=discogs_hq,
+                browser_fallback=effective_browser_fallback,
+                browser_headless=browser_headless,
+                captcha_wait_seconds=captcha_wait_timeout,
+                reuse_browser_session=effective_reuse_browser_session,
+                captcha_cooldown_base_seconds=resolved_cooldown_base,
+                captcha_cooldown_max_seconds=resolved_cooldown_max,
+                request_label=worker_label,
+                final_html_path=temp_html_path,
+                final_html_format=job["final_google_html_format"],
+            )
 
         if image_bytes is None:
             if temp_image_path.exists():
@@ -840,10 +946,41 @@ def _flush_result_updates(
     pending_updates.clear()
     return True
 
-    for key in ("dest", "final_google_html_path"):
-        path = result.get(key)
-        if path is not None:
-            Path(path).unlink(missing_ok=True)
+
+def _cleanup_orphan_images(
+    images_dir: Path,
+    referenced_image_names: set[str],
+    log: logging.Logger,
+) -> tuple[int, int, int, list[str]]:
+    """Delete orphan image files from *images_dir*.
+
+    Returns:
+        Tuple of ``(scanned_count, kept_count, removed_count, deleted_names)``.
+    """
+    scanned_count = 0
+    kept_count = 0
+    removed_count = 0
+    deleted_names: list[str] = []
+
+    for path in images_dir.iterdir():
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in _IMAGE_FILE_EXTENSIONS:
+            continue
+
+        scanned_count += 1
+        if path.name in referenced_image_names:
+            kept_count += 1
+            continue
+
+        try:
+            path.unlink(missing_ok=True)
+            removed_count += 1
+            deleted_names.append(path.name)
+        except Exception as exc:
+            log.warning("Could not remove orphan image %s: %s", path, exc)
+
+    return scanned_count, kept_count, removed_count, deleted_names
 
 
 # ---------------------------------------------------------------------------

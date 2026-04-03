@@ -550,6 +550,8 @@ def _resize(img: PILImage, cfg: dict[str, Any]) -> PILImage:
     Args:
         width:  Target width in pixels. Default: 500.
         height: Target height in pixels. Default: same as width.
+            Use ``"auto"`` to keep original aspect ratio from width.
+            ``width: "auto"`` is also supported when height is fixed.
         keep_aspect: If True (default), fit within width×height while
             preserving aspect ratio and padding with black.
         unsharp_radius:  Radius for post-resize UnsharpMask. Default: 1.5.
@@ -558,9 +560,29 @@ def _resize(img: PILImage, cfg: dict[str, Any]) -> PILImage:
     """
     from PIL import ImageFilter
 
-    target_w = int(cfg.get("width", cfg.get("target_size", 500)))
-    target_h = int(cfg.get("height", target_w))
+    width_cfg = cfg.get("width", cfg.get("target_size", 500))
+    height_cfg = cfg.get("height", width_cfg)
+
+    width_is_auto = isinstance(width_cfg, str) and width_cfg.strip().lower() == "auto"
+    height_is_auto = isinstance(height_cfg, str) and height_cfg.strip().lower() == "auto"
     keep_aspect = bool(cfg.get("keep_aspect", True))
+
+    if width_is_auto and height_is_auto:
+        logger.warning("resize step cannot use both width='auto' and height='auto' – skipping resize")
+        return img
+
+    if height_is_auto:
+        target_w = max(1, int(width_cfg))
+        target_h = max(1, round(img.height * (target_w / img.width)))
+        # Auto-derived dimension already preserves aspect ratio; no pad-to-box behavior.
+        keep_aspect = False
+    elif width_is_auto:
+        target_h = max(1, int(height_cfg))
+        target_w = max(1, round(img.width * (target_h / img.height)))
+        keep_aspect = False
+    else:
+        target_w = max(1, int(width_cfg))
+        target_h = max(1, int(height_cfg))
     unsharp_radius = float(cfg.get("unsharp_radius", 1.5))
     unsharp_percent = int(cfg.get("unsharp_percent", 120))
     unsharp_threshold = int(cfg.get("unsharp_threshold", 3))

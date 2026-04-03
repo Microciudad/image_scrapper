@@ -12,6 +12,10 @@ pipeline:
   # Clean JPEG artifacts/noise on the source BEFORE upscaling.
 
  
+  - step: resize
+    width: 500
+    height: 500
+    keep_aspect: true
 
   - step: denoise
     mode: gaussian   # 'gaussian' for JPEG blocks/ringing; 'median' for grain
@@ -48,14 +52,14 @@ pipeline:
   #- step: stop
 
   - step: resize
-    width: 350
-    height: 350
+    width: 400
+    height: auto 
     keep_aspect: true
     unsharp_radius: 1.5
     unsharp_percent: 120
     unsharp_threshold: 3
   
   - step: jpeg
-    quality: 60       # 1..100 (lower = more compression, smaller files)
+    quality: 35       # 1..100 (lower = more compression, smaller files)
     optimize: true    # smaller output, slightly slower
     progressive: true # progressive JPEG

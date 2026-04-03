@@ -15,6 +15,7 @@ from cover_fetcher.csv_handler import (
     IMAGE_COLUMN,
     build_image_filename,
     ensure_image_column,
+    get_referenced_image_filenames,
     iter_pending_rows,
     reserve_unique_filename,
     sanitize_filename,
@@ -77,6 +78,38 @@ def test_reserve_unique_filename_avoids_batch_collisions(tmp_path):
 
     assert first == "3D_Fantasia_7.jpg"
     assert second == "3D_Fantasia_7_2.jpg"
+
+
+def test_reserve_unique_filename_truncates_to_max_length(tmp_path):
+    reserved: set[str] = set()
+    long_name = ("a" * 150) + ".jpg"
+
+    result = reserve_unique_filename(long_name, tmp_path, reserved)
+
+    assert len(result) <= 100
+    assert result.endswith(".jpg")
+
+
+def test_reserve_unique_filename_truncates_with_collision_suffix(tmp_path):
+    reserved: set[str] = set()
+    long_name = ("b" * 150) + ".jpg"
+
+    first = reserve_unique_filename(long_name, tmp_path, reserved)
+    second = reserve_unique_filename(long_name, tmp_path, reserved)
+
+    assert len(first) <= 100
+    assert len(second) <= 100
+    assert second.endswith("_2.jpg")
+
+
+def test_reserve_unique_filename_honors_custom_max_length(tmp_path):
+    reserved: set[str] = set()
+    long_name = ("c" * 120) + ".jpg"
+
+    result = reserve_unique_filename(long_name, tmp_path, reserved, max_filename_length=40)
+
+    assert len(result) <= 40
+    assert result.endswith(".jpg")
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +243,33 @@ def test_iter_pending_rows_xlsx_uses_image_column(tmp_path):
     assert len(pending) == 1
     assert pending[0][0] == 1
     assert pending[0][1]["Band"] == "B"
+
+
+def test_get_referenced_image_filenames_csv_stops_at_blank_row(tmp_path):
+    csv_path = tmp_path / "collection.csv"
+    _write_simple_csv(
+        csv_path,
+        [
+            {"Band": "A", "Title": "One", IMAGE_COLUMN: "a.jpg"},
+            {"Band": "", "Title": "", IMAGE_COLUMN: "should_not_be_seen.jpg"},
+            {"Band": "B", "Title": "Two", IMAGE_COLUMN: "b.jpg"},
+        ],
+    )
+
+    referenced = get_referenced_image_filenames(csv_path)
+    assert referenced == {"a.jpg"}
+
+
+def test_get_referenced_image_filenames_xlsx_normalizes_basename(tmp_path):
+    xlsx_path = tmp_path / "collection.xlsx"
+    _write_simple_xlsx(
+        xlsx_path,
+        ["Band", "Title", EXCEL_IMAGE_COLUMN],
+        [["A", "One", "nested/path/a.jpg"], ["B", "Two", "b.jpg"]],
+    )
+
+    referenced = get_referenced_image_filenames(xlsx_path)
+    assert referenced == {"a.jpg", "b.jpg"}
 
 
 # ---------------------------------------------------------------------------

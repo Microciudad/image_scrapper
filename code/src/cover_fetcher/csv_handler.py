@@ -33,6 +33,7 @@ EXCEL_IMAGE_COLUMN = "Image"
 # Characters not allowed in file-system names
 _UNSAFE_CHARS = re.compile(r'[\\/:*?"<>|]')
 _CSV_DELIMITERS = ",;\t|"
+_MAX_IMAGE_FILENAME_LENGTH = 100
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +64,7 @@ def reserve_unique_filename(
     output_dir: str | Path,
     reserved_names: set[str],
     existing_names: set[str] | None = None,
+    max_filename_length: int = _MAX_IMAGE_FILENAME_LENGTH,
 ) -> str:
     """Return a filename unique across output_dir and reserved_names.
 
@@ -71,7 +73,7 @@ def reserve_unique_filename(
     The chosen name is added to ``reserved_names`` before returning.
     """
     output_dir = Path(output_dir)
-    path = Path(filename)
+    path = Path(_truncate_filename(filename, max_length=max_filename_length))
     stem = path.stem
     suffix = path.suffix or ".jpg"
 
@@ -82,13 +84,40 @@ def reserve_unique_filename(
         or (existing_names is not None and candidate in existing_names)
         or (existing_names is None and (output_dir / candidate).exists())
     ):
-        candidate = f"{stem}_{counter}{suffix}"
+        counter_suffix = f"_{counter}"
+        truncated_stem = _truncate_stem(
+            stem,
+            suffix,
+            max_length=max_filename_length,
+            extra_suffix=counter_suffix,
+        )
+        candidate = f"{truncated_stem}{counter_suffix}{suffix}"
         counter += 1
 
     reserved_names.add(candidate)
     if existing_names is not None:
         existing_names.add(candidate)
     return candidate
+
+
+def _truncate_filename(filename: str, max_length: int = _MAX_IMAGE_FILENAME_LENGTH) -> str:
+    """Return *filename* truncated to *max_length* characters, preserving extension."""
+    path = Path(filename)
+    suffix = path.suffix or ".jpg"
+    stem = path.stem
+    truncated_stem = _truncate_stem(stem, suffix, max_length=max_length)
+    return f"{truncated_stem}{suffix}"
+
+
+def _truncate_stem(
+    stem: str,
+    suffix: str,
+    max_length: int = _MAX_IMAGE_FILENAME_LENGTH,
+    extra_suffix: str = "",
+) -> str:
+    """Return stem truncated so stem+extra_suffix+suffix fits within *max_length*."""
+    max_stem_len = max(1, max_length - len(extra_suffix) - len(suffix))
+    return stem[:max_stem_len]
 
 
 def iter_pending_rows(
@@ -138,6 +167,45 @@ def iter_pending_rows(
             logger.debug("Row %d already done (%s) – skipping", idx, image_file)
             continue
         yield idx, row
+
+
+def get_referenced_image_filenames(csv_path: str | Path) -> set[str]:
+    """Return normalized image filenames currently referenced by the spreadsheet.
+
+    The scan stops at the first fully blank data row (same end-of-data behavior
+    as pending-row iteration).
+
+    Args:
+        csv_path: Path to CSV/XLSX collection file.
+
+    Returns:
+        Set of image filenames (basename only) present in the image column.
+
+    Raises:
+        ValueError: If the expected image column does not exist.
+    """
+    csv_path = Path(csv_path)
+    image_column = _get_image_column(csv_path)
+
+    if _is_excel_path(csv_path):
+        headers = _read_excel_headers(csv_path)
+    else:
+        headers = _read_csv_headers(csv_path)
+
+    if image_column not in headers:
+        raise ValueError(
+            f"Collection file {csv_path} must contain an existing '{image_column}' column."
+        )
+
+    referenced: set[str] = set()
+    for row in _read_all_rows(csv_path):
+        if _is_blank_row(row, image_column):
+            break
+        value = (row.get(image_column, "") or "").strip()
+        if value:
+            referenced.add(Path(value).name)
+
+    return referenced
 
 
 def update_row(
@@ -229,6 +297,13 @@ def _read_all_rows(csv_path: Path) -> list[dict[str, Any]]:
     with csv_path.open("r", newline="", encoding="utf-8-sig") as fh:
         reader = csv.DictReader(fh, delimiter=delimiter, quotechar='"', escapechar='\\')
         return [dict(row) for row in reader]
+
+
+def _read_csv_headers(csv_path: Path) -> list[str]:
+    delimiter = _detect_delimiter(csv_path)
+    with csv_path.open("r", newline="", encoding="utf-8-sig") as fh:
+        reader = csv.DictReader(fh, delimiter=delimiter, quotechar='"', escapechar='\\')
+        return [h.strip() for h in (reader.fieldnames or []) if h and h.strip()]
 
 
 def _read_all_rows_excel(path: Path) -> list[dict[str, Any]]:

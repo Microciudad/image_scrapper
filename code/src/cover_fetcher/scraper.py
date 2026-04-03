@@ -692,9 +692,6 @@ def _build_search_params(query: str) -> dict[str, str | int]:
         "hl": random.choice(_QUERY_LANGUAGE_POOL),
     }
 
-    if random.random() < 0.15:
-        params["start"] = random.choice([0, 10, 20, 30])
-
     return params
 
 
@@ -1146,7 +1143,7 @@ def _has_captcha(html: str, page: Any) -> bool:
 
     try:
         title = page.title().lower()
-        if "challenge" in title or ("verify" in title and "robot" in title):
+        if "verify" in title and "robot" in title:
             return True
     except PlaywrightError:
         pass
