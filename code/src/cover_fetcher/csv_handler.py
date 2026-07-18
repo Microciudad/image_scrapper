@@ -163,9 +163,35 @@ def iter_pending_rows(
             break
 
         image_file = (row.get(image_column, "") or "").strip()
+        if image_file.upper() == "GENERIC":
+            logger.debug("Row %d has GENERIC image – skipping", idx)
+            continue
         if image_file and (output_dir / image_file).exists():
             logger.debug("Row %d already done (%s) – skipping", idx, image_file)
             continue
+        yield idx, row
+
+
+def iter_rows_until_blank(
+    csv_path: str | Path,
+    scan_log_every: int = 0,
+) -> Iterator[tuple[int, dict[str, Any]]]:
+    """Yield ``(row_index, row_dict)`` for every row until the blank-row sentinel.
+
+    Unlike ``iter_pending_rows``, this does not skip rows with existing image files.
+    """
+    csv_path = Path(csv_path)
+    image_column = _get_image_column(csv_path)
+    rows = _read_all_rows(csv_path)
+
+    for idx, row in enumerate(rows):
+        if scan_log_every > 0 and (idx + 1) % scan_log_every == 0:
+            logger.info("Scanning rows... %d checked", idx + 1)
+
+        if _is_blank_row(row, image_column):
+            logger.info("Blank row encountered at index %d – stopping scan.", idx)
+            break
+
         yield idx, row
 
 
@@ -364,6 +390,9 @@ def _iter_pending_rows_excel(
                 break
 
             image_file = (row.get(image_column, "") or "").strip()
+            if image_file.upper() == "GENERIC":
+                logger.debug("Row %d has GENERIC image – skipping", idx)
+                continue
             if image_file and (output_dir / image_file).exists():
                 continue
             yield idx, row
@@ -442,7 +471,7 @@ def _update_excel_rows(path: Path, updates: list[tuple[int, str]]) -> None:
         wb.close()
 
 
-def _replace_with_retries(tmp_path: Path, target_path: Path, retries: int = 3, delay: float = 0.5) -> None:
+def _replace_with_retries(tmp_path: Path, target_path: Path, retries: int = 10, delay: float = 0.3) -> None:
     """Replace a file with small retries to tolerate brief Windows file locks."""
     last_error: Exception | None = None
     for attempt in range(1, retries + 1):

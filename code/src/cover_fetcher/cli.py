@@ -54,7 +54,7 @@ console = Console()
 
 _DEFAULT_OUTPUT_DIR = Path("downloads")
 _DEFAULT_PIPELINE = Path("pipeline.yaml")
-_RESULT_UPDATE_BATCH_SIZE = 25
+_RESULT_UPDATE_BATCH_SIZE = 100
 _PENDING_UPDATES_SUFFIX = ".pending_updates.json"
 _IMAGE_FILE_EXTENSIONS = {
     ".jpg",
@@ -70,6 +70,24 @@ _IMAGE_FILE_EXTENSIONS = {
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
+
+
+def _detect_missing_images(csv_path: Path, output_dir: Path) -> list[int]:
+    """Detect rows where the image file is referenced in CSV but missing from disk.
+    
+    Returns list of row indices that are missing images.
+    """
+    missing_rows: list[int] = []
+    try:
+        for row_index, row in csv_handler.iter_pending_rows(csv_path, output_dir, scan_log_every=0):
+            image_filename = _get_row_image_value(row)
+            if image_filename and image_filename.strip():
+                image_path = output_dir / image_filename
+                if not image_path.exists():
+                    missing_rows.append(row_index)
+    except Exception:
+        pass
+    return missing_rows
 
 
 @app.command()
@@ -177,12 +195,19 @@ def run(
     ),
     max_retries: int = typer.Option(3, "--max-retries", help="Number of Google fetch retries per row."),
     retry_delay: float = typer.Option(2.0, "--retry-delay", help="Base delay (seconds) between retries."),
+    image_index: int = typer.Option(
+        1,
+        "--image-index",
+        min=1,
+        max=10,
+        help="Which image from Google search results to use (1-indexed: 1=first, 2=second, 3=third, etc).",
+    ),
     workers: int = typer.Option(
         1,
         "--workers",
         min=1,
-        max=20,
-        help="Number of rows to process concurrently. Recommended: 1-4.",
+        max=100,
+        help="Number of rows to process concurrently. Recommended: 1-4. Warning: >20 workers may trigger more CAPTCHA challenges.",
     ),
     max_jobs: int = typer.Option(
         0,
@@ -284,7 +309,31 @@ def run(
             "Overrides --captcha-cooldown-base and --captcha-cooldown-max."
         ),
     ),
+    request_delay_range: Optional[str] = typer.Option(
+        None,
+        "--request-delay-range",
+        help=(
+            "Random per-thread request delay range as MIN-MAX seconds (for example: 0.5-2.0). "
+            "Higher values reduce CAPTCHA risk but slow throughput. Default: 0.3-1.0"
+        ),
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging."),
+    watch_and_refill: bool = typer.Option(
+        False,
+        "--watch-and-refill/--no-watch-and-refill",
+        help=(
+            "After each pass completes, check for missing images. If found, re-queue them and repeat. "
+            "Exit when a complete pass finds no missing images (useful when deleting images from disk while running)."
+        ),
+    ),
+    overwrite_existing_on_disk: bool = typer.Option(
+        False,
+        "--overwrite-existing-on-disk/--no-overwrite-existing-on-disk",
+        help=(
+            "Reprocess rows even when image_file already points to an existing file on disk, "
+            "and overwrite that file instead of skipping the row."
+        ),
+    ),
 ) -> None:
     """Process CSV covers or apply pipeline to a single existing image."""
 
@@ -295,6 +344,11 @@ def run(
         captcha_cooldown_range,
         captcha_cooldown_base,
         captcha_cooldown_max,
+    )
+    resolved_delay_min, resolved_delay_max = _resolve_request_delay_bounds(
+        request_delay_range,
+        0.3,  # default min
+        1.0,  # default max
     )
 
     if images_dir is not None:
@@ -438,7 +492,13 @@ def run(
     scanned_pending_rows = 0
     oversized_files_cleaned = 0
     prep_log_every = max(500, scan_log_every) if scan_log_every > 0 else 1000
-    pending_rows_iter = csv_handler.iter_pending_rows(csv_path, output_dir, scan_log_every=scan_log_every)
+    if overwrite_existing_on_disk:
+        console.print(
+            "[bold yellow]Overwrite mode enabled:[/] existing files referenced by rows will be regenerated."
+        )
+        pending_rows_iter = csv_handler.iter_rows_until_blank(csv_path, scan_log_every=scan_log_every)
+    else:
+        pending_rows_iter = csv_handler.iter_pending_rows(csv_path, output_dir, scan_log_every=scan_log_every)
     try:
         for row_index, row in pending_rows_iter:
             scanned_pending_rows += 1
@@ -498,13 +558,17 @@ def run(
                 auto_fill_updates[row_index] = persisted_image_value
                 continue
 
-            filename = csv_handler.reserve_unique_filename(
-                expected_filename,
-                output_dir,
-                reserved_names,
-                existing_names=existing_output_names,
-                max_filename_length=max_filename_length,
-            )
+            if overwrite_existing_on_disk and existing_image_value:
+                filename = Path(existing_image_value).name
+                reserved_names.add(filename)
+            else:
+                filename = csv_handler.reserve_unique_filename(
+                    expected_filename,
+                    output_dir,
+                    reserved_names,
+                    existing_names=existing_output_names,
+                    max_filename_length=max_filename_length,
+                )
             dest = output_dir / filename
             final_google_html_path: Optional[Path] = None
             final_google_html_format = "mhtml"
@@ -606,6 +670,8 @@ def run(
                 reuse_browser_session=effective_reuse_browser_session,
                 captcha_cooldown_base_seconds=resolved_cooldown_base,
                 captcha_cooldown_max_seconds=resolved_cooldown_max,
+                request_delay_min_seconds=resolved_delay_min,
+                request_delay_max_seconds=resolved_delay_max,
                 request_label=worker_label,
                 final_html_path=temp_html_path,
                 final_html_format=job["final_google_html_format"],
@@ -649,7 +715,7 @@ def run(
             task_id = progress.add_task(f"Fetching covers with {workers} worker(s)…", total=len(jobs))
             completed_rows = 0
             total_rows = len(jobs)
-            max_in_flight = max(workers, workers * 4)
+            max_in_flight = max(workers * 8, 200)  # Keep queue fuller to reduce batching bottleneck
             pending_result_updates: dict[int, str] = {}
             pending_update_reported = False
 
@@ -737,14 +803,72 @@ def run(
             finally:
                 executor.shutdown(wait=not interrupted, cancel_futures=interrupted)
     finally:
-        scraper.close_browser_session()
+        # Intentionally keep browser session open here so watch-and-refill
+        # can reuse cookies/session state across recursive passes.
+        pass
 
     if interrupted:
+        scraper.close_browser_session()
         removed_staging_files = _cleanup_staging_files(output_dir, log)
         if removed_staging_files > 0:
             console.print(f"[yellow]Removed temporary staging files:[/] {removed_staging_files}")
         os._exit(130)
 
+    # -- Watch-and-refill loop -----------------------------------------------
+    if watch_and_refill:
+        missing_rows = _detect_missing_images(csv_path, output_dir)
+        if missing_rows:
+            console.print(
+                f"[bold yellow]Watch-and-refill:[/] Detected {len(missing_rows)} missing images. "
+                f"Restarting scraping... (rows: {', '.join(map(str, missing_rows[:5]))}{'...' if len(missing_rows) > 5 else ''})"
+            )
+
+            # Re-run the process with watch mode still enabled so it keeps
+            # iterating until a pass completes with no missing images.
+            return run(
+                csv_path=csv_path,
+                input_image=None,
+                output_image=None,
+                marketplace=marketplace,
+                output_dir=output_dir,
+                max_filename_length=max_filename_length,
+                images_dir=None,
+                cleanup_orphan_images=False,
+                do_not_fetch_and_use=do_not_fetch_and_use,
+                pipeline_config=pipeline_config,
+                artist_col=artist_col,
+                title_col=title_col,
+                format_col=format_col,
+                label_col=label_col,
+                year_col=year_col,
+                country_col=country_col,
+                pipeline_col=pipeline_col,
+                pipelines_dir=pipelines_dir,
+                max_retries=max_retries,
+                retry_delay=retry_delay,
+                image_index=image_index,
+                workers=workers,
+                max_jobs=max_jobs,
+                scan_log_every=scan_log_every,
+                process_log_every=process_log_every,
+                dump_google_html=dump_google_html,
+                keep_google_html=keep_google_html,
+                keep_google_html_only=keep_google_html_only,
+                browser_fallback=browser_fallback,
+                browser_fallback_single_lane=browser_fallback_single_lane,
+                discogs_hq=discogs_hq,
+                browser_headless=browser_headless,
+                captcha_wait_timeout=captcha_wait_timeout,
+                reuse_browser_session=reuse_browser_session,
+                captcha_cooldown_base=captcha_cooldown_base,
+                captcha_cooldown_max=captcha_cooldown_max,
+                captcha_cooldown_range=captcha_cooldown_range,
+                verbose=verbose,
+                watch_and_refill=True,
+            )
+        console.print("[bold green]Watch-and-refill:[/] No missing images detected. Exiting.")
+
+    scraper.close_browser_session()
     console.print("[bold green]Done.[/]")
 
 
@@ -771,6 +895,42 @@ def _create_staging_path(output_dir: Path, suffix: str) -> Path:
     fd, tmp_path = tempfile.mkstemp(dir=output_dir, prefix=".stage_", suffix=suffix)
     os.close(fd)
     return Path(tmp_path)
+
+
+def _resolve_request_delay_bounds(
+    delay_range: Optional[str],
+    delay_base: float,
+    delay_max: float,
+) -> tuple[float, float]:
+    """Return request delay min/max from explicit values or a MIN-MAX range string."""
+    if delay_range:
+        text = delay_range.strip()
+        parts = text.split("-", 1)
+        if len(parts) != 2:
+            raise typer.BadParameter(
+                "--request-delay-range must use MIN-MAX format, e.g. 0.5-2.0."
+            )
+
+        try:
+            parsed_min = float(parts[0].strip())
+            parsed_max = float(parts[1].strip())
+        except ValueError as exc:
+            raise typer.BadParameter(
+                "--request-delay-range values must be floats, e.g. 0.5-2.0."
+            ) from exc
+
+        if parsed_min < 0.1 or parsed_max < 0.1:
+            raise typer.BadParameter("--request-delay-range values must be >= 0.1.")
+        if parsed_min > parsed_max:
+            raise typer.BadParameter(
+                "--request-delay-range minimum cannot be greater than maximum."
+            )
+        return parsed_min, parsed_max
+
+    if delay_base > delay_max:
+        raise typer.BadParameter("Request delay minimum cannot be greater than maximum.")
+
+    return delay_base, delay_max
 
 
 def _resolve_captcha_cooldown_bounds(

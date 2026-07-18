@@ -15,8 +15,8 @@ pipeline:
 
   - step: denoise
     mode: gaussian   # 'gaussian' for JPEG blocks/ringing; 'median' for grain
-    radius: 1.5      # increase to 1.2-1.5 for heavily compressed sources
-    strength: 0.85   # 0.0 = original, 1.0 = full filter
+    radius: 1.1      # increase to 1.2-1.5 for heavily compressed sources
+    strength: 0.25   # 0.0 = original, 1.0 = full filter
 
   - step: rotate
     degrees: {random: [1, 1]}  # random tilt per image; use a fixed number to disable    
@@ -41,16 +41,16 @@ pipeline:
 
   #- step: stop
 
-  - step: resize
-    width: 450
-    height: auto 
-    keep_aspect: true
-    unsharp_radius: 1.5
-    unsharp_percent: 120
-    unsharp_threshold: 3
+  # - step: resize
+    # width: 450
+    # height: auto 
+    # keep_aspect: true
+    # unsharp_radius: 1.5
+    # unsharp_percent: 120
+    # unsharp_threshold: 3
 
 
   - step: jpeg
-    quality: 40       # 1..100 (lower = more compression, smaller files)
+    quality: 90       # 1..100 (lower = more compression, smaller files)
     optimize: true    # smaller output, slightly slower
     progressive: true # progressive JPEG

@@ -35,16 +35,16 @@ pipeline:
 
   #- step: stop
 
-  - step: resize
-    width: 410
-    height: auto 
-    keep_aspect: true
-    unsharp_radius: 1.5
-    unsharp_percent: 120
-    unsharp_threshold: 3
+  # - step: resize
+    # width: 410
+    # height: auto 
+    # keep_aspect: true
+    # unsharp_radius: 1.5
+    # unsharp_percent: 120
+    # unsharp_threshold: 3
 
 
   - step: jpeg
-    quality: 45       # 1..100 (lower = more compression, smaller files)
+    quality: 90       # 1..100 (lower = more compression, smaller files)
     optimize: true    # smaller output, slightly slower
     progressive: true # progressive JPEG

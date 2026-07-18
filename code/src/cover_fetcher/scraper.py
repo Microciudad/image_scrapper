@@ -153,7 +153,10 @@ def fetch_cover(
     reuse_browser_session: bool = True,
     captcha_cooldown_base_seconds: int = _CAPTCHA_COOLDOWN_BASE_SECONDS,
     captcha_cooldown_max_seconds: int = _CAPTCHA_COOLDOWN_MAX_SECONDS,
+    request_delay_min_seconds: float = _MIN_REQUEST_DELAY_SECONDS,
+    request_delay_max_seconds: float = _MAX_REQUEST_DELAY_SECONDS,
     request_label: str = "",
+    image_index: int = 1,
 ) -> Optional[bytes]:
     """Search Google Images and return the first valid thumbnail as raw bytes.
 
@@ -180,10 +183,17 @@ def fetch_cover(
         captcha_cooldown_base_seconds: Initial cooldown after each block/CAPTCHA.
         captcha_cooldown_max_seconds: Maximum adaptive cooldown after repeated blocks.
         request_label: Optional human-readable worker/job label for logging.
+        image_index: Which image from search results to use (1-indexed). Default 1 for first image.
 
     Returns:
         Raw image bytes, or ``None`` if no suitable image was found.
     """
+    logger.info("[DEBUG] fetch_cover START: query=%r image_index=%d discogs_hq=%s browser_fallback=%s", query, image_index, discogs_hq, browser_fallback)
+    
+    # Store request delay range in thread-local state for use in _apply_delay()
+    _THREAD_STATE.request_delay_min = request_delay_min_seconds
+    _THREAD_STATE.request_delay_max = request_delay_max_seconds
+    
     session = _get_thread_session()
     search_queries = _build_search_queries(query)
     logger.debug("Google query variants: %s", search_queries)
@@ -261,6 +271,7 @@ def fetch_cover(
                             captcha_cooldown_base_seconds=captcha_cooldown_base_seconds,
                             captcha_cooldown_max_seconds=captcha_cooldown_max_seconds,
                             request_label=request_label,
+                            image_index=image_index,
                         )
                         if image_bytes:
                             return image_bytes
@@ -268,7 +279,9 @@ def fetch_cover(
                     logger.warning("Stopping after blocked Google response; skipping further retries and query variants")
                     return None
 
-                if discogs_hq:
+                if discogs_hq and image_index == 1:
+                    # Only use Discogs URL extraction for the first image
+                    # For indexed images, fall through to screenshot path which respects image grid position
                     discogs_candidates = _extract_discogs_image_urls(response.text)
                     if discogs_candidates:
                         logger.info("Discogs HQ candidates found: %d", len(discogs_candidates))
@@ -284,9 +297,37 @@ def fetch_cover(
                             )
                             logger.info("Downloaded Discogs HQ image (%d bytes)", len(image_bytes))
                             return image_bytes
+                elif discogs_hq and image_index > 1:
+                    # Image index > 1: need browser/screenshot to respect grid position
+                    # Force browser fallback
+                    logger.info(
+                        "Image index %d with Discogs HQ: forcing browser fallback to use screenshot method for indexed image",
+                        image_index,
+                    )
+                    if browser_fallback:
+                        image_bytes = _run_browser_fallback(
+                            search_query,
+                            min_image_bytes=min_image_bytes,
+                            dump_html_path=dump_html_path,
+                            discogs_hq=discogs_hq,
+                            final_html_path=final_html_path,
+                            final_html_format=final_html_format,
+                            attempt=request_number,
+                            headless=browser_headless,
+                            captcha_wait_seconds=captcha_wait_seconds,
+                            reuse_browser_session=reuse_browser_session,
+                            captcha_cooldown_base_seconds=captcha_cooldown_base_seconds,
+                            captcha_cooldown_max_seconds=captcha_cooldown_max_seconds,
+                            request_label=request_label,
+                            image_index=image_index,
+                        )
+                        if image_bytes:
+                            return image_bytes
+                    logger.warning("Browser fallback disabled; cannot use indexed image selection without browser")
+                    break
 
                 image_bytes = _extract_first_thumbnail(response.text, min_image_bytes)
-                if image_bytes:
+                if image_bytes and image_index == 1:
                     _save_final_google_snapshot(
                         final_html_path,
                         page=None,
@@ -300,6 +341,9 @@ def fetch_cover(
                 if candidates:
                     logger.info("Fallback candidate URLs found: %d", len(candidates))
                 for image_url in candidates[:12]:
+                    if image_index > 1:
+                        logger.debug("Skipping candidate URL extraction for image_index %d (requires browser screenshot)", image_index)
+                        break
                     logger.info("Fallback image URL: %s", image_url)
                     image_bytes = _download_image_url(image_url, headers, min_image_bytes, session=session)
                     if image_bytes:
@@ -341,6 +385,7 @@ def _run_browser_fallback(
     captcha_cooldown_base_seconds: int,
     captcha_cooldown_max_seconds: int,
     request_label: str,
+    image_index: int,
 ) -> Optional[bytes]:
     """Run browser fallback either directly or on the dedicated browser thread."""
     if reuse_browser_session:
@@ -360,6 +405,7 @@ def _run_browser_fallback(
             captcha_cooldown_base_seconds,
             captcha_cooldown_max_seconds,
             request_label,
+            image_index,
         )
         return future.result()
 
@@ -378,6 +424,7 @@ def _run_browser_fallback(
             captcha_cooldown_base_seconds,
             captcha_cooldown_max_seconds,
             request_label,
+            image_index,
         )
 
 
@@ -573,6 +620,24 @@ def _extract_discogs_image_urls(html: str) -> list[str]:
     return preferred + secondary
 
 
+def _prioritize_candidate_by_index(candidates: list[str], image_index: int) -> list[str]:
+    """Return candidates ordered so requested 1-indexed position is tried first."""
+    if not candidates:
+        return []
+
+    safe_index = max(1, image_index)
+    target = safe_index - 1
+    if target >= len(candidates):
+        logger.warning(
+            "Requested image index %d exceeds available candidates (%d); using first candidate",
+            safe_index,
+            len(candidates),
+        )
+        return candidates
+
+    return [candidates[target], *candidates[:target], *candidates[target + 1 :]]
+
+
 def _download_image_url(
     image_url: str,
     base_headers: dict[str, str],
@@ -678,7 +743,10 @@ def _apply_delay() -> None:
     """Apply small random delay to avoid highly bot-like request pacing."""
     last_request_time = getattr(_THREAD_STATE, "last_request_time", 0.0)
     elapsed = time.time() - last_request_time
-    delay = random.uniform(_MIN_REQUEST_DELAY_SECONDS, _MAX_REQUEST_DELAY_SECONDS)
+    # Use thread-local delay range if set, otherwise use module constants
+    delay_min = getattr(_THREAD_STATE, "request_delay_min", _MIN_REQUEST_DELAY_SECONDS)
+    delay_max = getattr(_THREAD_STATE, "request_delay_max", _MAX_REQUEST_DELAY_SECONDS)
+    delay = random.uniform(delay_min, delay_max)
     if elapsed < delay:
         time.sleep(delay - elapsed)
     _THREAD_STATE.last_request_time = time.time()
@@ -726,8 +794,11 @@ def _fetch_cover_via_browser(
     captcha_cooldown_base_seconds: int = _CAPTCHA_COOLDOWN_BASE_SECONDS,
     captcha_cooldown_max_seconds: int = _CAPTCHA_COOLDOWN_MAX_SECONDS,
     request_label: str = "",
+    image_index: int = 1,
 ) -> Optional[bytes]:
     """Fetch thumbnails via a real browser when Google challenges requests."""
+    logger.info("[DEBUG] _fetch_cover_via_browser: image_index=%d discogs_hq=%s", image_index, discogs_hq)
+    
     if sync_playwright is None:
         logger.warning("Browser fallback requested but Playwright is not installed")
         return None
@@ -761,6 +832,7 @@ def _fetch_cover_via_browser(
                 captcha_cooldown_base_seconds=captcha_cooldown_base_seconds,
                 captcha_cooldown_max_seconds=captcha_cooldown_max_seconds,
                 request_label=request_label,
+                image_index=image_index,
             )
 
         with sync_playwright() as playwright:
@@ -786,6 +858,7 @@ def _fetch_cover_via_browser(
                 captcha_cooldown_base_seconds=captcha_cooldown_base_seconds,
                 captcha_cooldown_max_seconds=captcha_cooldown_max_seconds,
                 request_label=request_label,
+                    image_index=image_index,
             )
     except PlaywrightError as exc:
         logger.warning("Browser fallback encountered an error: %s", exc)
@@ -814,6 +887,7 @@ def _extract_image_from_browser_page(
                 captcha_cooldown_base_seconds: int,
                 captcha_cooldown_max_seconds: int,
                 request_label: str,
+                image_index: int,
             ) -> Optional[bytes]:
                 """Extract image bytes from a loaded browser page, with CAPTCHA handling."""
                 if _has_captcha(page.content(), page):
@@ -903,7 +977,23 @@ def _extract_image_from_browser_page(
 
                 logger.debug("Extracted %d bytes of HTML after CAPTCHA/load", len(html))
 
-                if discogs_hq:
+                # When image_index > 1, prioritize screenshot to respect grid position
+                if image_index > 1:
+                    logger.info("Image index %d: using screenshot method to capture indexed image from grid", image_index)
+                    image_bytes = _screenshot_first_result_image(page, min_image_bytes, image_index)
+                    if image_bytes:
+                        _save_final_google_snapshot(
+                            final_html_path,
+                            page=page,
+                            html_fallback=html,
+                            output_format=final_html_format,
+                        )
+                        logger.info("Captured screenshot of indexed image (%d bytes)", len(image_bytes))
+                        return image_bytes
+                    logger.warning("Could not capture indexed image via screenshot, falling back to other methods")
+
+                if discogs_hq and image_index == 1:
+                    # Only use Discogs URL extraction for the first image
                     headers = _build_headers(referrer="https://www.google.com/")
                     discogs_candidates = _extract_discogs_image_urls(html)
                     for image_url in _extract_browser_image_sources(page):
@@ -933,9 +1023,17 @@ def _extract_image_from_browser_page(
                             )
                             logger.info("Downloaded Discogs HQ image from browser URL (%d bytes)", len(image_bytes))
                             return image_bytes
+                elif discogs_hq and image_index > 1:
+                    # Image index > 1: skip Discogs extraction and fall through to screenshot path
+                    # which correctly respects grid image position
+                    logger.info(
+                        "Image index %d requested with Discogs HQ in browser mode: "
+                        "skipping Discogs extraction to use screenshot method for indexed image",
+                        image_index,
+                    )
 
                 image_bytes = _extract_first_thumbnail(html, min_image_bytes)
-                if image_bytes:
+                if image_bytes and image_index == 1:
                     _save_final_google_snapshot(
                         final_html_path,
                         page=page,
@@ -950,6 +1048,9 @@ def _extract_image_from_browser_page(
                 if candidates:
                     logger.info("Found %d candidate image URLs in HTML", len(candidates))
                 for image_url in candidates[:12]:
+                    if image_index > 1:
+                        logger.debug("Skipping candidate URL extraction for image_index %d (use screenshot only)", image_index)
+                        break
                     logger.debug("Trying candidate URL: %s", image_url)
                     image_bytes = _download_image_url(image_url, headers, min_image_bytes)
                     if image_bytes:
@@ -964,6 +1065,9 @@ def _extract_image_from_browser_page(
 
                 logger.debug("Trying to extract image sources from rendered DOM...")
                 for image_url in _extract_browser_image_sources(page):
+                    if image_index > 1:
+                        logger.debug("Skipping DOM image extraction for image_index %d (use screenshot only)", image_index)
+                        break
                     logger.debug("Trying DOM image source: %s", image_url)
                     if image_url.startswith("data:image/"):
                         image_bytes = _decode_data_image_url(image_url, min_image_bytes)
@@ -981,7 +1085,9 @@ def _extract_image_from_browser_page(
                         return image_bytes
 
                 logger.debug("Attempting screenshot fallback...")
-                image_bytes = _screenshot_first_result_image(page, min_image_bytes)
+                if image_index > 1:
+                    logger.info("Final attempt: screenshot method for image index %d", image_index)
+                image_bytes = _screenshot_first_result_image(page, min_image_bytes, image_index)
                 if image_bytes:
                     _save_final_google_snapshot(
                         final_html_path,
@@ -992,6 +1098,8 @@ def _extract_image_from_browser_page(
                     logger.info("Captured screenshot of image (%d bytes)", len(image_bytes))
                     return image_bytes
 
+                if image_index > 1:
+                    logger.error("FAILED to capture image index %d via screenshot - no valid images found at that position", image_index)
                 logger.warning("No images could be extracted from rendered page after CAPTCHA solve")
                 return None
 
@@ -1279,32 +1387,62 @@ def _extract_browser_image_sources(page: Any) -> list[str]:
     return deduped
 
 
-def _screenshot_first_result_image(page: Any, min_image_bytes: int) -> Optional[bytes]:
-    """Capture the first plausible visible image result as a PNG screenshot."""
+def _screenshot_first_result_image(page: Any, min_image_bytes: int, result_index: int = 1) -> Optional[bytes]:
+    """Capture a plausible visible image result as a PNG screenshot.
+    
+    Args:
+        page: Playwright page object.
+        min_image_bytes: Minimum image size in bytes.
+        result_index: Which result to capture (1-indexed). 1 = first, 2 = second, etc.
+    """
     try:
         image_elements = page.locator("img")
         count = min(image_elements.count(), 20)
+        logger.info("[DEBUG] _screenshot_first_result_image: total img elements on page: %d, target result_index: %d", count, result_index)
     except PlaywrightError as exc:
         logger.debug("Could not enumerate browser images: %s", exc)
         return None
 
+    found_count = 0
+    skipped_count = 0
+    small_box_count = 0
+    
     for index in range(count):
         try:
             locator = image_elements.nth(index)
             src = locator.get_attribute("src") or locator.get_attribute("currentSrc") or ""
+            
+            # Skip branding
             if "google.com/images/branding" in src:
+                skipped_count += 1
+                logger.debug("[DEBUG] img[%d] skipped: branding", index)
                 continue
 
+            # Check size
             box = locator.bounding_box()
             if not box or box["width"] < 80 or box["height"] < 80:
+                small_box_count += 1
+                logger.debug("[DEBUG] img[%d] skipped: small/no box (w=%s h=%s)", index, box.get("width") if box else "None", box.get("height") if box else "None")
                 continue
 
+            # Try to screenshot
             image_bytes = locator.screenshot(type="png")
             if len(image_bytes) >= min_image_bytes:
-                return image_bytes
-        except PlaywrightError:
+                found_count += 1
+                logger.info("[DEBUG] img[%d] valid result #%d (%d bytes, w=%d h=%d)", index, found_count, len(image_bytes), box["width"], box["height"])
+                
+                if found_count == result_index:
+                    logger.info("Captured screenshot result #%d at element index %d (%d bytes)", result_index, index, len(image_bytes))
+                    return image_bytes
+            else:
+                logger.debug("[DEBUG] img[%d] too small (%d bytes < %d min)", index, len(image_bytes), min_image_bytes)
+                
+        except PlaywrightError as exc:
+            logger.debug("[DEBUG] img[%d] error: %s", index, exc)
             continue
 
+    logger.warning("[DEBUG] Could not capture image result #%d - scanned %d elements, %d branding, %d small_box, %d valid results found", 
+                   result_index, count, skipped_count, small_box_count, found_count)
     return None
 
 
