@@ -16,7 +16,7 @@ pipeline:
   - step: denoise
     mode: gaussian   # 'gaussian' for JPEG blocks/ringing; 'median' for grain
     radius: 1.5      # increase to 1.2-1.5 for heavily compressed sources
-    strength: 0.45   # 0.0 = original, 1.0 = full filter
+    strength: 0.15   # 0.0 = original, 1.0 = full filter
 
   - step: rotate
     degrees: {random: [1, 1]}  # random tilt per image; use a fixed number to disable    
